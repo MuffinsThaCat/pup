@@ -118,7 +118,7 @@ If you're not on a blockchain, use SPHINCS+. If you are, you're leaving a 13.5x 
 
 ## Verification
 
-We don't ask you to trust the math on faith. The scheme comes with three test suites totaling 285 tests:
+We don't ask you to trust the math on faith. The scheme comes with three test suites totaling 205 tests:
 
 - **84 functional tests** — correctness, edge cases, performance, cross-validation
 - **80 security proof tests** — 7 formal theorems with executable verification, including reduction extraction and exhaustive checksum completeness

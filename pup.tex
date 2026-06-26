@@ -202,7 +202,9 @@ tweak:
 \subsection{W-OTS+ (Winternitz One-Time Signatures)}
 
 We use W-OTS+~\cite{wots} with Winternitz parameter $w$. A message $m$
-is hashed to $n$ bytes, then encoded as $\ell_1 = \lceil 8n / \lg w
+is hashed to $n$ bytes via
+$\hash_n^{\mathsf{MSG}}(\mathsf{leaf\_idx},\, m)$, then encoded as
+$\ell_1 = \lceil 8n / \lg w
 \rceil$ base-$w$ digits. A checksum of $\ell_2 = \lceil \lceil
 \log_2(\ell_1(w-1) + 1) \rceil / \lg w \rceil$ digits is appended,
 giving $\ell = \ell_1 + \ell_2$ total digits.
@@ -260,9 +262,12 @@ by the network.
 \end{enumerate}
 \end{definition}
 
-This model captures Ethereum (EIP-155~\cite{eip155}), Solana, Aptos,
-Sui, and all account-based blockchains. UTXO-based chains (Bitcoin) do
-not have per-account nonces and are outside our scope.
+This model captures Ethereum (EIP-155~\cite{eip155}), Aptos, and any
+account-based blockchain with sequential per-account nonces. Chains
+that use alternative replay protection (e.g., Solana's recent
+blockhashes, Sui's object versioning) do not satisfy this model without
+protocol adaptation. UTXO-based chains (Bitcoin) do not have
+per-account nonces and are outside our scope.
 
 The sequential nonce model provides strictly stronger guarantees than
 the state management required by XMSS or LMS: those schemes need
@@ -452,25 +457,29 @@ The \emph{delta count} for the transition to leaf $i$ is:
 \subsection{Average Cost}
 
 \begin{theorem}\label{thm:avg-delta}
-The expected delta count over $N = 2^k$ consecutive transitions is:
+The average delta count over the $N - 1$ transitions in a tree of
+$N = 2^k$ leaves (transitions at indices $i = 1, \ldots, N - 1$) is:
 \[
-\mathbb{E}[\delta] = 1 - \frac{1}{N}
+\mathbb{E}[\delta] = \frac{N - 1 - k}{N - 1}
 \]
 \end{theorem}
 
 \begin{proof}
-$\sum_{i=1}^{N} \nu_2(i) = N - s_2(N)$ where $s_2(N)$ is the number
-of 1-bits in the binary representation of $N$. For $N = 2^k$,
-$s_2(N) = 1$, giving $\sum = N - 1$. Thus
-$\mathbb{E} = (N - 1) / N = 1 - 1/N$.
+$\sum_{i=1}^{N-1} \nu_2(i) = (N - 1) - s_2(N - 1)$ where $s_2(m)$
+is the number of 1-bits in the binary representation of $m$. For
+$N = 2^k$, $N - 1 = 2^k - 1$ has $k$ one-bits, so $s_2(N-1) = k$,
+giving $\sum = N - 1 - k$. Thus
+$\mathbb{E} = (N - 1 - k) / (N - 1)$.
+For $k = 20$: $\mathbb{E} = (2^{20} - 21) / (2^{20} - 1) \approx
+0.99998$, which rounds to $1$ in all signature size calculations.
 \end{proof}
 
 \subsection{Signature Size}
 
-The average signature size is:
+The average signature size is (using $\mathbb{E}[\delta] \approx 1$):
 \[
-|\Sigma|_{\text{avg}} = 4 + \ell \cdot n + \mathbb{E}[\delta] \cdot n
-= 4 + 35 \cdot 16 + 1 \cdot 16 = 580 \text{ bytes}
+|\Sigma|_{\text{avg}} \approx 4 + \ell \cdot n + 1 \cdot n
+= 4 + 35 \cdot 16 + 16 = 580 \text{ bytes}
 \]
 
 The worst case occurs at powers of 2 ($\delta = H - 1 = 19$):
@@ -557,6 +566,21 @@ signature as an additional signing query (making $q + 1$ queries
 total), the forgery target moves to $q + 1$; if the adversary does
 not query the oracle at index $q$, then it has zero signatures at
 the target leaf, which is strictly harder to attack.
+
+\paragraph{Chain reorganizations.}
+The sequential nonce model assumes finality: a transaction at nonce $i$,
+once included, is never reverted. If a chain reorganization reverts a
+transaction, the signer has already revealed the W-OTS+ key for leaf
+$i$. Re-signing at the same nonce with a different message (which a
+reorg may necessitate) would expose two signatures under the same
+one-time key, breaking the scheme's security. Signers \emph{must}
+wait for finality before treating a signature as consumed. On
+Ethereum, this means waiting for the block to reach justified/finalized
+status under Casper FFG (${\sim}13$ minutes). On chains with
+single-slot finality (e.g., Aptos), the risk window is one block.
+This requirement is identical to the finality assumption already
+implicit in any blockchain state model: a wallet that displays a
+confirmed balance before finality faces the same reorg risk.
 
 \subsection{W-OTS+ Unforgeability}
 
@@ -691,9 +715,12 @@ $\leq q_H^{2/3} / 2^{8n/3}$ against a quantum adversary (by the BHT
 bound~\cite{bht}).
 
 We verify this exhaustively for $(w, \ell_1) \in \{(4, 4), (4, 6),
-(8, 3)\}$, covering all $17{,}100{,}032$ distinct digit pairs, and
-by random sampling of $2^{20}$ message pairs at $(16, 32)$, with zero
-violations in either case.
+(8, 3)\}$, covering all $17{,}100{,}032$ distinct digit pairs.
+At the production parameters $(w, \ell_1) = (16, 32)$, exhaustive
+enumeration is infeasible ($16^{32} \approx 10^{38}$ digit sequences);
+we verify by random sampling of $2^{20}$ message pairs, with zero
+violations. The proof above covers the general case by contradiction;
+the computational checks are supplementary evidence.
 \end{proof}
 
 \subsection{Many-Time EU-CMA Security}
