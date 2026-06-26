@@ -1,4 +1,5 @@
-# POOP: Post-quantum Signatures That Are 13.5x Smaller Than SPHINCS+ (By Letting the Blockchain Do the Work)
+# PUP: Post-quantum Signatures That Are 13.5x Smaller Than SPHINCS+ (By Letting the Blockchain Do the Work)
+
 
 **TL;DR:** We designed a post-quantum signature scheme that produces ~580-byte signatures instead of SPHINCS+'s ~7,856 bytes, verifies ~53x faster, and relies on the same hash-only security assumption. The trick: stop treating the blockchain as a dumb pipe and make it a participant in the cryptographic protocol.
 
@@ -34,9 +35,9 @@ But here's the thing: **blockchains already track state per account.** Every acc
 
 That's exactly the state a Merkle-tree signature scheme needs.
 
-## How POOP Works
+## How PUP Works
 
-**POOP** (Post-quantum Optimized On-chain Protocol) co-designs the signature scheme with the blockchain's existing state model. The core idea is three-fold:
+**PUP** (Post-quantum Unicity Protocol) co-designs the signature scheme with the blockchain's existing state model. The core idea is three-fold:
 
 ### 1. Leaf index = transaction nonce
 
@@ -76,7 +77,7 @@ SPHINCS+ uses a hypertree (a tree of trees) with FORS few-time signatures at the
 
 For NIST Level I equivalent security (n=16 bytes, w=16, H=20):
 
-| Metric | SPHINCS+-128s | POOP |
+| Metric | SPHINCS+-128s | PUP |
 |--------|--------------|------|
 | Signature size (avg) | 7,856 B | **~580 B** |
 | Signature size (worst) | 7,856 B | **~880 B** |
@@ -99,13 +100,13 @@ This is subtle but important for cryptographers.
 
 In SPHINCS+, the security proof reduces EU-CMA security to the security of the underlying OTS and hash function. But the reduction isn't tight — it loses a factor of 2^(h/d) because the simulator has to *guess* which subtree the adversary will target. This is inherent to stateless schemes: the adversary can adaptively choose where to attack.
 
-In POOP, the adversary has **zero adaptive choice.** The blockchain state fixes the target leaf to `next_index`. The simulator knows exactly where to embed its challenge. The reduction is tight: if you can break POOP, you can break the hash function with the same advantage.
+In PUP, the adversary has **zero adaptive choice.** The blockchain state fixes the target leaf to `next_index`. The simulator knows exactly where to embed its challenge. The reduction is tight: if you can break PUP, you can break the hash function with the same advantage.
 
-This means POOP's *proven* security is closer to its *actual* security than SPHINCS+'s is. At the same parameter size, you get more security in practice.
+This means PUP's *proven* security is closer to its *actual* security than SPHINCS+'s is. At the same parameter size, you get more security in practice.
 
 ## The Tradeoff
 
-POOP is not a general-purpose signature scheme. It requires:
+PUP is not a general-purpose signature scheme. It requires:
 
 1. **A blockchain (or equivalent ordered state machine)** that enforces sequential per-account signing and can store ~328 bytes of authentication state per account.
 
@@ -145,8 +146,8 @@ The scheme is implemented in Python as a reference. The natural next steps are:
 3. **Formal security proof** in the QROM (quantum random oracle model) for publication
 4. **Tree compaction** — the signer doesn't need to store the full tree; it can regenerate branches on demand from the seed
 
-The code is open. The math is tested. The name is unfortunate. But the 13.5x signature compression is real.
+The code is open. The math is tested. The 13.5x signature compression is real.
 
 ---
 
-*POOP: Post-quantum Optimized On-chain Protocol. Built on the observation that blockchains already solve the hardest problem in stateful cryptography — they just didn't know it.*
+*PUP: Post-quantum Unicity Protocol. Built on the observation that blockchains already solve the hardest problem in stateful cryptography — they just didn't know it.*

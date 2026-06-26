@@ -21,6 +21,7 @@ from chain_hash_sig import (
     build_merkle_tree, merkle_auth_path, merkle_root_from_leaf, merkle_node_hash,
     merge_level, delta_count,
     keygen, create_account, registration_data, sign, verify_and_update,
+    _bound_payload,
     FullKey, PublicKey, AuthState, Signature,
     DOMAIN_LEAF, DOMAIN_NODE, DOMAIN_CHAIN, DOMAIN_MSG,
     _all_digits, _checksum_bytes,
@@ -450,10 +451,9 @@ class TestSecurity:
         sig_b = wots_sign(sk, b'message B', FAST, leaf_idx=0)
         assert sig_a != sig_b
 
-    def test_tampered_delta_causes_future_failure(self):
-        """If an attacker tampers with the delta, the current sig still
-        verifies (delta isn't used for current verification), but the
-        NEXT verification will fail because the cache is corrupted."""
+    def test_tampered_delta_rejected_immediately(self):
+        """With bound-payload construction, tampering with delta invalidates
+        the OTS signature at the CURRENT verification, not just the next."""
         fk, pk, state = _make_keys(FAST)
 
         sig0 = sign(fk, b'tx-0', 0)
@@ -464,12 +464,8 @@ class TestSecurity:
         bad_delta = [os.urandom(FAST.n)] * len(sig1.delta) if sig1.delta else []
         if bad_delta:
             bad_sig1 = Signature(index=1, ots_sig=sig1.ots_sig, delta=bad_delta)
-            ok, bad_state = verify_and_update(pk, b'tx-1', bad_sig1, state)
-            assert ok  # current sig verifies (delta is for NEXT state)
-
-            sig2 = sign(fk, b'tx-2', 2)
-            ok2, _ = verify_and_update(pk, b'tx-2', sig2, bad_state)
-            assert not ok2  # corrupted cache → root mismatch
+            ok, _ = verify_and_update(pk, b'tx-1', bad_sig1, state)
+            assert not ok  # bound payload: delta tampering fails immediately
 
 
 # ===================================================================
@@ -584,7 +580,7 @@ class TestSizeMeasurements:
         state_bytes = p.auth_state_bytes
         print(f"\n  On-chain state per account: {state_bytes} bytes")
         print(f"  At 1M accounts: {state_bytes * 1_000_000 / 1e6:.0f} MB")
-        assert state_bytes == 20 * 16 + 8  # 328 bytes
+        assert state_bytes == 20 * 16 + 4  # 324 bytes
 
     def test_public_key_size(self):
         p = Params(n=16, w=16, H=20)

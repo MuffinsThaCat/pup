@@ -1,4 +1,4 @@
-# POOP: Post-quantum Optimized On-chain Protocol
+# PUP: Post-quantum Unicity Protocol
 
 A post-quantum signature scheme that produces **~580-byte signatures** (vs SPHINCS+ ~7,856B) under hash-only assumptions, by co-designing with blockchain state.
 
@@ -12,7 +12,7 @@ A post-quantum signature scheme that produces **~580-byte signatures** (vs SPHIN
 
 ## How It Works
 
-Blockchains already enforce sequential per-account nonces. POOP binds the signature leaf index to the transaction nonce, eliminating the catastrophic leaf-reuse weakness of stateful hash-based signatures. The chain caches each account's Merkle authentication path (~328 bytes) and the signer sends only the delta — an average of one hash (16 bytes) per signature.
+Blockchains already enforce sequential per-account nonces. PUP binds the signature leaf index to the transaction nonce, eliminating the catastrophic leaf-reuse weakness of stateful hash-based signatures. The chain caches each account's Merkle authentication path (~328 bytes) and the signer sends only the delta — an average of one hash (16 bytes) per signature.
 
 ## Files
 
@@ -20,7 +20,7 @@ Blockchains already enforce sequential per-account nonces. POOP binds the signat
 - `test_chain_hash_sig.py` — 84 functional tests
 - `proof_chain_hash_sig.py` — 80 security proof tests (7 theorems)
 - `verify_exhaustive.py` — 41 exhaustive verification tests
-- `poop_blog.md` — Blog post explaining the scheme
+- `pup_blog.md` — Blog post explaining the scheme
 
 ## Run Tests
 

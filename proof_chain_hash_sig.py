@@ -29,7 +29,7 @@ from chain_hash_sig import (
     wots_keygen, wots_pk_hash, wots_sign, wots_verify, wots_recover_leaf, wots_chain,
     build_merkle_tree, merkle_auth_path, merkle_root_from_leaf, merkle_node_hash,
     merge_level, delta_count,
-    keygen, create_account, registration_data, sign, verify_and_update,
+    keygen, create_account, registration_data, sign, verify_and_update, _bound_payload,
     FullKey, PublicKey, AuthState, Signature,
     DOMAIN_LEAF, DOMAIN_NODE, DOMAIN_CHAIN,
     _leaf_addr, _node_addr, _addr,
@@ -354,7 +354,8 @@ class TestTheorem3_ManyTime_EUCMA:
         # A legitimate signature recovers this exact leaf:
         msg = b'legitimate'
         sig = sign(fk, msg, target_idx)
-        recovered = wots_recover_leaf(sig.ots_sig, msg, FAST,
+        bound = _bound_payload(msg, sig.delta)
+        recovered = wots_recover_leaf(sig.ots_sig, bound, FAST,
                                       leaf_idx=target_idx)
         assert recovered == committed_leaf
 

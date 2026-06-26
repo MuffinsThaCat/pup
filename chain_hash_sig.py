@@ -88,7 +88,7 @@ class Params:
 
     @property
     def auth_state_bytes(self) -> int:
-        return self.H * self.n + 8
+        return self.H * self.n + 4
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +295,7 @@ class AuthState:
     @property
     def size_bytes(self) -> int:
         n = len(self.cached_siblings[0]) if self.cached_siblings else 0
-        return 8 + len(self.cached_siblings) * n
+        return 4 + len(self.cached_siblings) * n
 
 
 @dataclass
@@ -345,12 +345,18 @@ def registration_data(fk: FullKey) -> tuple[bytes, list[bytes]]:
     return leaf_0_hash, auth_0
 
 
+def _bound_payload(msg: bytes, delta: list[bytes]) -> bytes:
+    """Bind the message and delta into a single payload for OTS signing.
+    This prevents a block proposer from tampering with delta in transit."""
+    length = len(msg).to_bytes(4, 'big')
+    return length + msg + b''.join(delta)
+
+
 def sign(fk: FullKey, msg: bytes, index: int) -> Signature:
     p = fk.params
     assert 0 <= index < p.max_sigs
 
     sk_chains, _ = wots_keygen(fk.seed, index, p)
-    ots_sig = wots_sign(sk_chains, msg, p, leaf_idx=index)
 
     target_next = index + 1
     dc = delta_count(target_next) if target_next < p.max_sigs else 0
@@ -359,6 +365,9 @@ def sign(fk: FullKey, msg: bytes, index: int) -> Signature:
         next_at_level = target_next >> level
         sibling_idx = next_at_level ^ 1
         delta.append(fk.tree[level][sibling_idx])
+
+    bound = _bound_payload(msg, delta)
+    ots_sig = wots_sign(sk_chains, bound, p, leaf_idx=index)
 
     return Signature(index=index, ots_sig=ots_sig, delta=delta)
 
@@ -372,7 +381,8 @@ def verify_and_update(pk: PublicKey, msg: bytes, sig: Signature,
     if sig.index >= p.max_sigs:
         return False, None
 
-    leaf_hash = wots_recover_leaf(sig.ots_sig, msg, p, leaf_idx=sig.index)
+    bound = _bound_payload(msg, sig.delta)
+    leaf_hash = wots_recover_leaf(sig.ots_sig, bound, p, leaf_idx=sig.index)
 
     root = merkle_root_from_leaf(leaf_hash, sig.index, state.cached_siblings, p.n)
     if root != pk.root:
