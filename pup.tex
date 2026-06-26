@@ -7,6 +7,8 @@
 \usepackage{booktabs}
 \usepackage{hyperref}
 \usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,calc,arrows.meta}
 
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}[theorem]{Lemma}
@@ -157,6 +159,63 @@ quantum security, and a tighter security proof, all under the same
 hash-only assumption. A compact parameter set ($n = 16$) further
 reduces signatures to ${\sim}580$ bytes at ${\sim}2^{55}$ quantum
 security, comparable to SPHINCS+-128s.
+Figure~\ref{fig:structure} summarizes the structural simplification.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=3pt, minimum width=28mm,
+    minimum height=7mm, font=\small, align=center},
+  lbl/.style={font=\footnotesize, align=center},
+  arr/.style={-{Stealth}, thick, black!50},
+  xscale=1
+]
+% ---- SPHINCS+ (left) ----
+\node[font=\small\bfseries] at (-3.2,4.2) {SLH-DSA (SPHINCS+)};
+
+\node[box, fill=red!8] (fors) at (-3.2,3.3) {FORS};
+\node[box, fill=red!8] (ht) at (-3.2,2.2)
+  {Hypertree ($d$ layers)};
+\node[box, fill=red!8] (otsx) at (-3.2,1.1)
+  {$d \times$ W-OTS+};
+\node[box, fill=red!8] (authx) at (-3.2,0.0)
+  {$d \times$ Auth Path};
+
+\draw[arr] (fors) -- (ht);
+\draw[arr] (ht) -- (otsx);
+\draw[arr] (otsx) -- (authx);
+
+\node[lbl, red!60!black] at (-3.2,-0.7)
+  {$7{,}856$ B\,/\,sig};
+
+% ---- Arrow ----
+\draw[-{Stealth}, very thick, black!30]
+  (-0.9,1.65) -- node[above, font=\scriptsize, black!60]
+  {nonce binding} (0.9,1.65);
+
+% ---- PUP (right) ----
+\node[font=\small\bfseries] at (3.2,4.2) {PUP};
+
+\node[box, fill=green!12] (ots) at (3.2,2.75)
+  {$1 \times$ W-OTS+};
+\node[box, fill=green!12] (delt) at (3.2,1.65)
+  {$\Delta \approx 1$ hash};
+\node[box, fill=blue!8, draw=blue!30, dashed] (chain)
+  at (3.2,0.55) {Blockchain state};
+
+\draw[arr] (ots) -- (delt);
+\draw[arr] (delt) -- (chain);
+
+\node[lbl, green!50!black] at (3.2,-0.15)
+  {$580$--$884$ B\,/\,sig};
+\end{tikzpicture}
+\caption{Structural comparison.  SPHINCS+ uses a $d$-level hypertree,
+FORS few-time signatures, and $d$ full authentication paths to achieve
+statelessness.  PUP replaces all three with a single W-OTS+ signature
+and a delta of ${\approx}\,1$ hash, by binding leaf indices to
+blockchain-enforced nonces and caching the authentication path
+on-chain.}\label{fig:structure}
+\end{figure}
 
 \section{Preliminaries}
 
@@ -175,22 +234,28 @@ unique address to prevent multi-target attacks.
 
 \begin{definition}[Tweaked Hash]
 Let $\hash : \bin^* \to \bin^{8n}$ be a hash function (instantiated as
-SHA-256 truncated to $n$ bytes). For domain separator $d \in \bin^8$
-and address $\mathsf{addr} \in \bin^*$, define:
+SHA-256 truncated to $n$ bytes). For a public seed
+$\mathsf{seed} \in \bin^{8n}$, domain separator $d \in \bin^8$, and
+address $\mathsf{addr} \in \bin^*$, define:
 \[
-\hash_n^d(\mathsf{addr}, x) = \hash(d \concat \mathsf{addr} \concat x)[{:}n]
+\hash_n^d(\mathsf{seed}, \mathsf{addr}, x) = \hash(d \concat
+\mathsf{seed} \concat \mathsf{addr} \concat x)[{:}n]
 \]
+Each key pair generates an independent $\mathsf{seed}$, ensuring that
+different key pairs evaluate independent tweaked-hash families in the
+random oracle model and preventing multi-target attacks across accounts.
 \end{definition}
 
 We use four domain separators for the tweaked hash:
 $\mathsf{LEAF} = \mathtt{0x00}$,
 $\mathsf{NODE} = \mathtt{0x01}$, $\mathsf{CHAIN} = \mathtt{0x02}$,
-$\mathsf{MSG} = \mathtt{0x04}$.
+$\mathsf{MSG} = \mathtt{0x03}$.
 A separate PRF derives per-leaf secret keys:
 $\prf(\mathsf{sk}, i) = \mathrm{HMAC}\text{-}\mathrm{SHA256}(\mathsf{sk}, i)[{:}n]$.
 
 Address structures ensure that every hash call site receives a unique
-tweak:
+tweak. In all cases, $\mathsf{seed}$ is prepended via the tweaked-hash
+definition above; only the variable address components are listed:
 \begin{itemize}
 \item Chain hash: $\mathsf{addr} = (\mathsf{leaf\_idx} \concat
 \mathsf{chain\_idx} \concat \mathsf{step})$
@@ -307,20 +372,23 @@ for both parameter sets.
 
 \subsection{Key Generation}
 
-Given a random seed $\mathsf{sk} \xleftarrow{\$} \bin^{256}$:
+Given a random seed $\mathsf{sk} \xleftarrow{\$} \bin^{256}$ and a
+random public seed $\mathsf{seed} \xleftarrow{\$} \bin^{8n}$:
 
 \begin{enumerate}
 \item For each $i \in [2^H]$, derive the $i$-th W-OTS+ key pair
 $(\mathsf{sk}_i, \mathsf{pk}_i)$ using $\prf(\mathsf{sk}, i)$.
 \item Compute leaf hashes:
-$L_i = \hash_n^{\mathsf{LEAF}}(i,\, \mathsf{pk}_i^{(0)} \concat
-\cdots \concat \mathsf{pk}_i^{(\ell-1)})$.
-\item Build the Merkle tree over $\{L_i\}$. The root $R$ is the public
-key.
+$L_i = \hash_n^{\mathsf{LEAF}}(\mathsf{seed},\, i,\,
+\mathsf{pk}_i^{(0)} \concat \cdots \concat
+\mathsf{pk}_i^{(\ell-1)})$.
+\item Build the Merkle tree over $\{L_i\}$ using
+$\hash_n^{\mathsf{NODE}}(\mathsf{seed},\, \cdot)$.  The root $R$ is
+the verification key.
 \end{enumerate}
 
-The full signing key is $(\mathsf{sk}, \text{tree})$. The public key is
-$(R, \mathsf{params})$.
+The full signing key is $\mathsf{SK} = (\mathsf{sk}, \mathsf{seed},
+\text{tree})$. The public key is $\mathsf{PK} = (R, \mathsf{seed})$.
 
 \subsection{Account Registration}
 
@@ -350,8 +418,9 @@ To sign message $m$ at index $i = \mathsf{state.next\_index}$:
 $\mathsf{auth}_i$ and $\mathsf{auth}_{i+1}$, excluding the one
 derivable by the verifier (see Section~\ref{sec:delta}).
 \item Form the \emph{bound payload}
-$\hat{m} = \mathsf{len}(m) \concat m \concat \Delta[0] \concat \cdots
-\concat \Delta[|\Delta|-1]$.
+$\hat{m} = \mathsf{LE64}(|m|) \concat m \concat \Delta[0] \concat
+\cdots \concat \Delta[|\Delta|-1]$, where $\mathsf{LE64}$ encodes the
+message length as an 8-byte little-endian integer.
 \item Compute the W-OTS+ signature $\sigma_{\mathsf{ots}}$ on $\hat{m}$
 using the key at leaf $i$.
 \end{enumerate}
@@ -365,16 +434,16 @@ The signature is $\Sigma = (i, \sigma_{\mathsf{ots}}, \Delta)$.
 
 \subsection{Verification and State Update}
 
-Given public key $(R, \mathsf{params})$, message $m$, signature
-$\Sigma = (i, \sigma_{\mathsf{ots}}, \Delta)$, and on-chain state
-$\mathsf{state}$:
+Given public key $\mathsf{PK} = (R, \mathsf{seed})$, message $m$,
+signature $\Sigma = (i, \sigma_{\mathsf{ots}}, \Delta)$, and on-chain
+state $\mathsf{state}$:
 
 \begin{enumerate}
 \item \textbf{Index check:} Reject if $i \neq
 \mathsf{state.next\_index}$.
 \item \textbf{Bind payload:} Reconstruct
-$\hat{m} = \mathsf{len}(m) \concat m \concat \Delta[0] \concat \cdots
-\concat \Delta[|\Delta|-1]$.
+$\hat{m} = \mathsf{LE64}(|m|) \concat m \concat \Delta[0] \concat
+\cdots \concat \Delta[|\Delta|-1]$.
 \item \textbf{OTS recovery:} Compute the leaf hash $L$ from
 $\sigma_{\mathsf{ots}}$ and $\hat{m}$ by completing each W-OTS+ chain
 to position $w - 1$ and hashing the concatenated endpoints.
@@ -394,6 +463,90 @@ levels from $L$ using the old cached siblings.
 \end{itemize}
 \item Set $\mathsf{state.next\_index} \leftarrow i + 1$.
 \end{enumerate}
+
+\subsection{Formal Specification}
+
+Algorithms~\ref{alg:keygen}--\ref{alg:verify} give the complete
+specification. $\mathsf{WOTS.KG}$ generates a W-OTS+ key pair from a
+seed, $\mathsf{WOTS.Sign}$ produces a one-time signature, and
+$\mathsf{WOTS.PkRecover}$ recovers the leaf hash from a signature and
+message by completing each chain and hashing the endpoints.
+$\mathsf{MerkleRoot}$ walks from a leaf hash to the root using
+the provided siblings. $\mathsf{WalkUp}$ hashes upward through
+$k$ levels of siblings from a starting value.
+
+\begin{algorithm}[t]
+\caption{$\mathsf{PUP.KeyGen}(1^\secpar)$}\label{alg:keygen}
+\begin{algorithmic}[1]
+\State $\mathsf{sk} \xleftarrow{\$} \bin^{256}$;\quad
+$\mathsf{seed} \xleftarrow{\$} \bin^{8n}$
+\For{$i = 0$ \textbf{to} $2^H - 1$}
+  \State $(\mathsf{sk}_i, \mathsf{pk}_i) \gets
+  \mathsf{WOTS.KG}(\prf(\mathsf{sk}, i),\, \mathsf{seed},\, i)$
+  \State $L_i \gets \hash_n^{\mathsf{LEAF}}(\mathsf{seed},\, i,\,
+  \mathsf{pk}_i)$
+\EndFor
+\State $\mathsf{tree} \gets \mathsf{BuildMerkle}(\{L_i\},\,
+\mathsf{seed})$;\quad $R \gets \mathsf{tree.root}$
+\State \Return $\mathsf{SK} = (\mathsf{sk}, \mathsf{seed},
+\mathsf{tree})$,\; $\mathsf{PK} = (R, \mathsf{seed})$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{$\mathsf{PUP.Sign}(\mathsf{SK},\, m,\, i)$
+\hfill \textit{// $i = \mathsf{state.next\_index}$}}
+\label{alg:sign}
+\begin{algorithmic}[1]
+\State $(\mathsf{sk}_i, \_) \gets \mathsf{WOTS.KG}(\prf(\mathsf{SK.sk},
+i),\, \mathsf{SK.seed},\, i)$
+\If{$i + 1 < 2^H$}
+  \State $M \gets \nu_2(i + 1) + 1$
+  \State $\Delta \gets
+  (\mathsf{SK.tree.sibling}(i{+}1, 0),\, \ldots,\,
+  \mathsf{SK.tree.sibling}(i{+}1, M{-}2))$
+\Else\ $\Delta \gets ()$
+\EndIf
+\State $\hat{m} \gets \mathsf{LE64}(|m|) \concat m \concat
+\Delta[0] \concat \cdots \concat \Delta[|\Delta|{-}1]$
+\State $\sigma_{\mathsf{ots}} \gets \mathsf{WOTS.Sign}(\mathsf{sk}_i,
+\, \mathsf{SK.seed},\, i,\, \hat{m})$
+\State \Return $\Sigma = (i,\, \sigma_{\mathsf{ots}},\, \Delta)$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{$\mathsf{PUP.Verify}(\mathsf{PK},\, m,\, \Sigma,\,
+\mathsf{state})$}\label{alg:verify}
+\begin{algorithmic}[1]
+\State Parse $\Sigma = (i,\, \sigma_{\mathsf{ots}},\, \Delta)$
+\If{$i \neq \mathsf{state.next\_index}$}
+  \Return $(\bot,\, \mathsf{state})$
+\EndIf
+\State $\hat{m} \gets \mathsf{LE64}(|m|) \concat m \concat
+\Delta[0] \concat \cdots \concat \Delta[|\Delta|{-}1]$
+\State $L \gets \mathsf{WOTS.PkRecover}(\sigma_{\mathsf{ots}},\,
+\mathsf{PK.seed},\, i,\, \hat{m})$
+\State $R' \gets \mathsf{MerkleRoot}(L,\, \mathsf{state.cached},\, i)$
+\If{$R' \neq \mathsf{PK.}R$}
+  \Return $(\bot,\, \mathsf{state})$
+\EndIf
+\If{$i + 1 = 2^H$}
+  \Return $(\top,\; (\mathsf{next\_index}{=}2^H,\,
+  \mathsf{cached}{=}\mathsf{state.cached}))$
+\EndIf
+\State $M \gets \nu_2(i + 1) + 1$
+\State $\mathsf{derived} \gets \mathsf{WalkUp}(L,\,
+\mathsf{state.cached}[0{:}M{-}2],\, i)$
+\State $\mathsf{cached}' \gets \mathsf{state.cached}$
+\State $\mathsf{cached}'[M{-}1] \gets \mathsf{derived}$
+\For{$k = 0$ \textbf{to} $M - 2$}
+  \State $\mathsf{cached}'[k] \gets \Delta[k]$
+\EndFor
+\State \Return $(\top,\; (\mathsf{next\_index}{=}i{+}1,\,
+\mathsf{cached}{=}\mathsf{cached}'))$
+\end{algorithmic}
+\end{algorithm}
 
 \section{Delta Compression}\label{sec:delta}
 
@@ -486,6 +639,93 @@ The worst case occurs at powers of 2 ($\delta = H - 1 = 19$):
 \[
 |\Sigma|_{\text{worst}} = 4 + 35 \cdot 16 + 19 \cdot 16 = 868 \text{ bytes}
 \]
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  nd/.style={draw, circle, minimum size=5.5mm, inner sep=0pt,
+    font=\scriptsize},
+  lf/.style={draw, rectangle, minimum width=5.5mm, minimum height=5mm,
+    inner sep=0pt, font=\scriptsize},
+  unch/.style={fill=black!8},
+  delta/.style={fill=blue!25, draw=blue!60, thick},
+  derived/.style={fill=orange!30, draw=orange!70, thick},
+  verified/.style={fill=green!20, draw=green!60, thick},
+  nextlf/.style={fill=green!10, draw=green!40, dashed},
+  edge/.style={draw, thick, black!50},
+  xscale=0.92
+]
+% Leaves (level 0)
+\node[lf] (L0) at (0,0) {$L_0$};
+\node[lf, verified] (L1) at (1.3,0) {$L_1$};
+\node[lf, nextlf] (L2) at (2.6,0) {$L_2$};
+\node[lf] (L3) at (3.9,0) {$L_3$};
+\node[lf] (L4) at (5.7,0) {$L_4$};
+\node[lf] (L5) at (7.0,0) {$L_5$};
+\node[lf] (L6) at (8.3,0) {$L_6$};
+\node[lf] (L7) at (9.6,0) {$L_7$};
+
+% Level 1
+\node[nd, derived] (N10) at (0.65,1.3) {\tiny$N_{\!1,0}$};
+\node[nd] (N11) at (3.25,1.3) {\tiny$N_{\!1,1}$};
+\node[nd] (N12) at (6.35,1.3) {\tiny$N_{\!1,2}$};
+\node[nd] (N13) at (8.95,1.3) {\tiny$N_{\!1,3}$};
+
+% Level 2
+\node[nd, unch] (N20) at (1.95,2.6) {\tiny$N_{\!2,0}$};
+\node[nd, unch] (N21) at (7.65,2.6) {\tiny$N_{\!2,1}$};
+
+% Root
+\node[nd] (R) at (4.8,3.9) {$R$};
+
+% Edges
+\foreach \a/\b in {L0/N10, L1/N10, L2/N11, L3/N11,
+  L4/N12, L5/N12, L6/N13, L7/N13,
+  N10/N20, N11/N20, N12/N21, N13/N21, N20/R, N21/R}
+  \draw[edge] (\a) -- (\b);
+
+% Labels below leaves
+\node[below=2mm of L1, font=\scriptsize, green!50!black]
+  {$i{=}1$};
+\node[below=2mm of L2, font=\scriptsize, green!30!black]
+  {$i{=}2$};
+
+% Delta annotation
+\draw[delta, rounded corners=2pt, fill=blue!8]
+  ([xshift=-3mm, yshift=-3mm]L3.south west)
+  rectangle ([xshift=3mm, yshift=3mm]L3.north east);
+\node[lf, delta] at (3.9,0) {$L_3$};
+\node[below=2mm of L3, font=\scriptsize, blue!70!black]
+  {$\Delta[0]$};
+
+% Derived annotation
+\node[left=6mm of N10, font=\scriptsize, orange!70!black,
+  align=right] {\tiny derived by\\[-1pt]\tiny verifier};
+\draw[-{Stealth}, orange!60, thick]
+  ([xshift=-2mm]N10.west) +(-0.7,0) -- ([xshift=-1mm]N10.west);
+
+% Unchanged annotation
+\node[above right=2mm and 3mm of N21, font=\scriptsize, black!50]
+  {\tiny unchanged};
+
+% Walk-up arrow (showing derivation)
+\draw[-{Stealth}, orange!50, dashed, thick]
+  ([xshift=2mm]L1.north) to[out=85,in=-80]
+  ([xshift=1mm, yshift=-1mm]N10.south);
+\node[right=1mm of N10, yshift=-6mm,
+  font=\tiny, orange!60!black] {$\mathsf{walk}(L_1)$};
+\end{tikzpicture}
+\caption{Delta compression for the transition from leaf~$1$ (nonce
+$i{=}1$) to leaf~$2$ (nonce $i{=}2$).  The merge level is
+$M(2) = \nu_2(2) + 1 = 2$: siblings at levels $0$ and $1$ change.
+The sibling at level~$1$ ($N_{1,0}$, \textcolor{orange!70!black}{orange})
+is \emph{derived} by the verifier by walking up from the verified leaf
+$L_1$.  Only the sibling at level~$0$ ($L_3$,
+\textcolor{blue!70!black}{blue}) is transmitted as
+$\Delta$---one hash.  Siblings at level~$2$ and above
+(\textcolor{black!50}{gray}) are shared between consecutive leaves and
+remain cached.}\label{fig:delta}
+\end{figure}
 
 \section{Security Analysis}\label{sec:security}
 
@@ -914,11 +1154,15 @@ multi-target advantage:
 which costs $\approx 3.0$ bits of security. This slightly exceeds the
 $2.6$-bit margin between the OTS bound ($2^{54.9}$) and the collision
 bound ($2^{57.5}$) at $n = 16$, reducing the effective collision
-security to ${\sim}2^{54.5}$. Since the OTS bound ($2^{54.9}$) remains
-the bottleneck, the overall security level is unchanged. At $n = 20$,
-the margin is $2.8$ bits and the multi-target cost is the same $3.0$
-bits, giving effective collision security ${\sim}2^{70.5}$ vs.\ OTS
-$2^{70.7}$---still OTS-dominated.
+security to ${\sim}2^{54.5}$---marginally below the OTS bound and
+therefore the overall bottleneck. The effect is negligible: the
+security level shifts from ${\sim}2^{54.9}$ to ${\sim}2^{54.5}$,
+well within rounding of the ${\sim}2^{55}$ figure reported throughout.
+At $n = 20$, the margin is $2.8$ bits and the multi-target cost is
+the same $3.0$ bits, giving effective collision security
+${\sim}2^{70.5}$ vs.\ OTS $2^{70.7}$---again collision-dominated
+by $0.2$ bits, shifting the overall level from ${\sim}2^{70.7}$ to
+${\sim}2^{70.5}$, negligible in practice.
 
 \textbf{Exhaustive verification.} We verify address uniqueness
 computationally for the default parameters: all $2^{20} \cdot 35 \cdot
@@ -1034,6 +1278,16 @@ which the adversary has quantum query access (i.e., the adversary can
 evaluate $\hash$ in superposition). We now give a full QROM proof
 showing that the reduction's tightness is preserved.
 
+We model $\hash$ as a public random oracle accessible to all
+parties via quantum queries: the adversary $\mathcal{A}$ may prepare an
+input register in superposition and query
+$|x\rangle|y\rangle \mapsto |x\rangle|y \oplus \hash(x)\rangle$,
+receiving the output in superposition. A reduction is
+\emph{straight-line} if it runs $\mathcal{A}$ as a black box,
+forwarding every quantum oracle query to the real oracle without
+interception, measurement, or reprogramming, and extracts its result
+solely from $\mathcal{A}$'s classical output.
+
 \begin{theorem}[QROM Security]\label{thm:qrom}
 In the QROM, PUP achieves Sequential EU-CMA security with advantage:
 \[
@@ -1084,17 +1338,22 @@ $\varepsilon_{\mathrm{prf}}^{\mathrm{QROM}} \leq
 2^{20} \cdot 2^{160} / 2^{256} = 2^{-76}$, which is negligible.
 
 \textbf{Step 2: Signing simulation.}
-In Game~1 (all keys independent and random), the reduction answers all
-$q'$ signing queries using the random keys at positions
-$0, \ldots, q' - 1$. The reduction runs $\mathcal{A}$ with
-\emph{honest} quantum oracle access to $\hash$---the random oracle is
-not modified, patched, or reprogrammed. $\mathcal{A}$ makes
-superposition queries to $\hash$ and receives honest answers throughout.
-This is the critical structural property: because the reduction is
-``straight-line'' (run $\mathcal{A}$ honestly, then extract from its
-classical output), it avoids the oracle-reprogramming step that
-introduces $O(q_H)$ or $O(q_H^2)$ losses in typical QROM
-reductions~\cite{dongyanglong}.
+In Game~1 (all keys independent and random), the reduction
+$\mathcal{B}$ answers all $q'$ signing queries using the random keys at
+positions $0, \ldots, q' - 1$. Crucially, $\mathcal{B}$ forwards every
+quantum oracle query from $\mathcal{A}$ to the real oracle
+$|\hash\rangle$ without interception, measurement, or reprogramming:
+\[
+\mathcal{A}^{|\hash\rangle}(\mathsf{pk}) \;\longrightarrow\;
+\mathcal{B}\text{ answers signing queries classically, passes }
+|\hash\rangle\text{ through unchanged}
+\]
+At no point during the simulation does $\mathcal{B}$ modify
+$\mathcal{A}$'s oracle interface. The reduction is straight-line in the
+sense defined above: $\mathcal{B}$ runs $\mathcal{A}$ honestly, then
+extracts from its classical output. This avoids the
+oracle-reprogramming step that introduces $O(q_H)$ or $O(q_H^2)$
+losses in typical QROM reductions~\cite{dongyanglong}.
 
 \textbf{Step 3: W-OTS+ extraction in the QROM.}
 When $\mathcal{A}$ outputs its forgery $(m^*, \Sigma^*)$, this is a
@@ -1141,7 +1400,7 @@ ${\sim}2^{55}$ for $n = 16$ and ${\sim}2^{71}$ for $n = 20$.
 In many QROM reductions (e.g., for Fiat--Shamir signatures), the
 simulator must ``program'' the random oracle to embed a challenge,
 then argue that reprogramming is undetectable. The
-Dong--Yang--Long~\cite{dongyanglong} measure-and-reprogram lemma
+Don et al.~\cite{dongyanglong} measure-and-reprogram lemma
 bounds the loss at $O(q_H)$ per reprogramming event; for SPHINCS+,
 this applies at the FORS layer.
 
@@ -1262,7 +1521,7 @@ existing Ethereum wallet already does.
 \midrule
 Signature (avg) & 7,856 B & 3,704 B & 580 B & 884 B \\
 Signature (worst) & 7,856 B & 3,704 B & 868 B & 1,244 B \\
-Public key & 32 B & 16 B & 16 B & 20 B \\
+Public key & 32 B & 16 B & 32 B & 40 B \\
 On-chain state & 0 B & 0 B & 324 B & 404 B \\
 Verify hashes & ${\sim}2{,}090$ & ${\sim}470$ & ${\sim}285$ & ${\sim}345$ \\
 Reduction & $2^{h/d}$ loss & $2^{h/d}$ loss & tight & tight \\
@@ -1354,6 +1613,42 @@ key exhaustion detection, independent accounts (cross-account
 signatures rejected), bounded on-chain state size, deterministic
 keygen reproducibility.
 \end{itemize}
+
+\section{Key Rotation}\label{sec:rotation}
+
+Each PUP key pair supports at most $2^H$ signatures. At $H = 20$,
+this is ${\sim}1{,}048{,}576$ transactions per account---sufficient for
+most end-user wallets (one transaction per minute for two years) but
+potentially limiting for high-frequency accounts such as automated
+market makers. We outline a simple rotation protocol that maintains
+uninterrupted account operation.
+
+\paragraph{Protocol.}
+Before the current key pair $\mathsf{PK}_1$ is exhausted, the account
+holder generates a fresh key pair $(\mathsf{SK}_2, \mathsf{PK}_2)$
+and submits a \emph{rotation transaction} signed under $\mathsf{PK}_1$.
+This transaction registers $\mathsf{PK}_2$ and its initial
+authentication path, exactly as in the original account registration
+(Section~3.3). The chain stores the new cached state for
+$\mathsf{PK}_2$ alongside the existing state for $\mathsf{PK}_1$.
+Upon finalization, the account's active key transitions to
+$\mathsf{PK}_2$ at nonce $i + 1$, and the old cached state for
+$\mathsf{PK}_1$ is garbage-collected.
+
+The rotation itself consumes one signature under $\mathsf{PK}_1$
+(reducing the remaining capacity by one) and one registration payload
+($H \cdot n$ bytes for the initial authentication path). No additional
+protocol machinery is required beyond the existing registration and
+verification logic. A wallet that monitors its remaining key capacity
+can schedule rotations automatically---e.g., rotating when the
+remaining capacity falls below $2^{16}$, leaving ample margin.
+
+\paragraph{No security interaction.}
+Since each key pair derives from an independent secret seed, the
+security of $\mathsf{PK}_2$ is independent of $\mathsf{PK}_1$.
+Exhausting or compromising $\mathsf{PK}_1$ (after rotation) does not
+affect $\mathsf{PK}_2$. The rotation transaction itself is protected
+by the EU-CMA security of $\mathsf{PK}_1$ at the time of signing.
 
 \section{Conclusion}
 

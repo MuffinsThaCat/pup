@@ -67,7 +67,7 @@ new sibling hashes on average. The average value of v₂ over all integers is ex
 
 **One hash. That's the average delta. 16 bytes.**
 
-The chain stores the current authentication path (~328 bytes per account) and evolves it with each signature verification. The signer sends only what changed.
+The chain stores the current authentication path (~324 bytes per account) and evolves it with each signature verification. The signer sends only what changed.
 
 ### 3. Flat Merkle tree, no hypertree
 
@@ -108,7 +108,7 @@ This means PUP's *proven* security is closer to its *actual* security than SPHIN
 
 PUP is not a general-purpose signature scheme. It requires:
 
-1. **A blockchain (or equivalent ordered state machine)** that enforces sequential per-account signing and can store ~328 bytes of authentication state per account.
+1. **A blockchain (or equivalent ordered state machine)** that enforces sequential per-account signing and can store ~324 bytes of authentication state per account.
 
 2. **Key rotation every ~1M signatures.** The tree has 2^20 leaves. At one transaction per block (12s blocks), that's ~388 years. At one tx/second, it's ~12 days. High-frequency accounts need key rotation — which is a normal blockchain operation.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Security proof for the chain-native stateful hash-based signature scheme.
+Security proof for PUP — Post-quantum Unicity Protocol.
 
 Structure:
   Theorem 1  W-OTS+ one-time unforgeability (→ hash chain one-wayness)
@@ -37,6 +37,8 @@ from chain_hash_sig import (
 
 FAST = Params(n=16, w=16, H=6)
 TINY = Params(n=16, w=4, H=4)   # small w for exhaustive checksum tests
+
+_TEST_PUB_SEED = b'pub-seed-16bytes'
 
 
 def _setup(p=FAST, seed=b'proof-seed-exactly-32-bytes!!!!!'):
@@ -94,32 +96,31 @@ class TestTheorem1_OTS_Unforgeability:
         at least one chain BACKWARD."""
         p = FAST
         seed = os.urandom(32)
-        sk, pk = wots_keygen(seed, 0, p)
+        ps = os.urandom(p.n)
+        sk, pk = wots_keygen(seed, ps, 0, p)
         msg1 = b'original message'
-        sig1 = wots_sign(sk, msg1, p, leaf_idx=0)
+        sig1 = wots_sign(sk, msg1, p, ps, leaf_idx=0)
 
-        digits1 = _all_digits(msg1, p)
+        digits1 = _all_digits(msg1, p, ps)
 
         # Adversary picks a different message
         msg2 = b'forged message!!'
-        digits2 = _all_digits(msg2, p)
+        digits2 = _all_digits(msg2, p, ps)
 
         # Try to forge by advancing chains forward where possible
         forged_sig = []
         needs_backward = False
         for i in range(p.l):
             if digits2[i] >= digits1[i]:
-                # Can go forward: iterate from sig1[i] by (d2-d1) steps
                 forged_sig.append(
                     wots_chain(sig1[i], digits1[i], digits2[i] - digits1[i], p.n,
-                               leaf_idx=0, chain_idx=i))
+                               ps, leaf_idx=0, chain_idx=i))
             else:
-                # Need to go BACKWARD — impossible without hash inversion
                 needs_backward = True
-                forged_sig.append(sig1[i])  # can't do better
+                forged_sig.append(sig1[i])
 
         assert needs_backward, "checksum should force at least one backward chain"
-        assert not wots_verify(forged_sig, msg2, pk, p, leaf_idx=0)
+        assert not wots_verify(forged_sig, msg2, pk, p, ps, leaf_idx=0)
 
     def test_reduction_extraction(self):
         """Simulate the reduction: given a (hypothetical) forgery, extract
@@ -128,47 +129,41 @@ class TestTheorem1_OTS_Unforgeability:
         legitimate chain produces a second-preimage witness."""
         p = FAST
         seed = os.urandom(32)
-        sk, pk = wots_keygen(seed, 0, p)
+        ps = os.urandom(p.n)
+        sk, pk = wots_keygen(seed, ps, 0, p)
 
         msg = b'signed message'
-        sig = wots_sign(sk, msg, p, leaf_idx=0)
-        digits = _all_digits(msg, p)
+        sig = wots_sign(sk, msg, p, ps, leaf_idx=0)
+        digits = _all_digits(msg, p, ps)
 
         msg_f = b'forged message'
-        digits_f = _all_digits(msg_f, p)
+        digits_f = _all_digits(msg_f, p, ps)
 
-        # Find backward indices (where d_f < d_orig)
         backward_indices = [i for i in range(p.l) if digits_f[i] < digits[i]]
 
         assert len(backward_indices) > 0, "checksum guarantees ≥1 backward index"
 
         j = backward_indices[0]
 
-        # The legitimate chain value at position digits_f[j]:
         legit_at_target = wots_chain(sk[j], 0, digits_f[j], p.n,
-                                     leaf_idx=0, chain_idx=j)
-        # Any forgery value σ*_j ≠ legit_at_target that still verifies
-        # would constitute a second preimage (two inputs → same output
-        # after (w-1-d*_j) chain steps).
-        # And σ*_j = legit_at_target means the adversary inverted the chain.
-        # Either way: hash function broken.
+                                     ps, leaf_idx=0, chain_idx=j)
 
-        # Verify: forward-iterating the legitimate value reaches pk[j]
         recovered = wots_chain(legit_at_target, digits_f[j],
                                p.w - 1 - digits_f[j], p.n,
-                               leaf_idx=0, chain_idx=j)
+                               ps, leaf_idx=0, chain_idx=j)
         assert recovered == pk[j]
 
     @pytest.mark.parametrize("trial", range(50))
     def test_random_message_pairs_always_have_backward_chain(self, trial):
         """For random message pairs, the checksum always forces ≥1 backward."""
         p = FAST
+        ps = _TEST_PUB_SEED
         m1 = os.urandom(32)
         m2 = os.urandom(32)
         if m1 == m2:
             return
-        d1 = _all_digits(m1, p)
-        d2 = _all_digits(m2, p)
+        d1 = _all_digits(m1, p, ps)
+        d2 = _all_digits(m2, p, ps)
         backward = sum(1 for i in range(p.l) if d2[i] < d1[i])
         assert backward > 0
 
@@ -229,7 +224,6 @@ class TestTheorem2_ChecksumCompleteness:
                 if seq_a == seq_b:
                     continue
                 db = compute_all_digits(list(seq_b))
-                # Check: at least one index where db[j] < da[j]
                 has_backward = any(db[j] < da[j] for j in range(l))
                 if not has_backward:
                     violations += 1
@@ -240,12 +234,12 @@ class TestTheorem2_ChecksumCompleteness:
         """If any message digit increases, the checksum value decreases,
         forcing at least one checksum digit to decrease."""
         p = FAST
+        ps = _TEST_PUB_SEED
         msg = os.urandom(32)
-        digits = _all_digits(msg, p)
+        digits = _all_digits(msg, p, ps)
         msg_digits = digits[:p.l1]
         csum = sum(p.w - 1 - d for d in msg_digits)
 
-        # Increase one message digit
         modified = list(msg_digits)
         for i in range(p.l1):
             if modified[i] < p.w - 1:
@@ -258,13 +252,13 @@ class TestTheorem2_ChecksumCompleteness:
         """If D*_j ≥ D_j for ALL j (message + checksum), then the message
         hash digits must be identical, meaning m and m* collide under H."""
         p = FAST
+        ps = _TEST_PUB_SEED
         for _ in range(100):
             m1, m2 = os.urandom(32), os.urandom(32)
-            d1 = _all_digits(m1, p)
-            d2 = _all_digits(m2, p)
+            d1 = _all_digits(m1, p, ps)
+            d2 = _all_digits(m2, p, ps)
             all_geq = all(d2[j] >= d1[j] for j in range(p.l))
             if all_geq:
-                # Must mean same message-hash digits (→ hash collision)
                 assert d1[:p.l1] == d2[:p.l1]
 
 
@@ -323,20 +317,16 @@ class TestTheorem3_ManyTime_EUCMA:
         """The adversary MUST target exactly next_index. Any other index
         is rejected before OTS verification even runs."""
         fk, pk, state = _setup()
-        # Sign indices 0..4
         for i in range(5):
             sig = sign(fk, f'msg-{i}'.encode(), i)
             ok, state = verify_and_update(pk, f'msg-{i}'.encode(), sig, state)
             assert ok
-        # State now expects index 5
         assert state.next_index == 5
 
-        # Forge at index 3 (past — replay)
         sig3 = sign(fk, b'forged', 3)
         ok, _ = verify_and_update(pk, b'forged', sig3, state)
         assert not ok
 
-        # Forge at index 7 (future — skip)
         sig7 = sign(fk, b'forged', 7)
         ok, _ = verify_and_update(pk, b'forged', sig7, state)
         assert not ok
@@ -348,38 +338,34 @@ class TestTheorem3_ManyTime_EUCMA:
         fk, pk, state = _setup()
         target_idx = 0
 
-        # The committed leaf hash at index 0:
         committed_leaf = fk.tree[0][target_idx]
 
-        # A legitimate signature recovers this exact leaf:
         msg = b'legitimate'
         sig = sign(fk, msg, target_idx)
         bound = _bound_payload(msg, sig.delta)
-        recovered = wots_recover_leaf(sig.ots_sig, bound, FAST,
+        recovered = wots_recover_leaf(sig.ots_sig, bound, FAST, fk.pub_seed,
                                       leaf_idx=target_idx)
         assert recovered == committed_leaf
 
-        # A forgery with a different OTS key would recover a different leaf:
         fake_seed = os.urandom(32)
-        fake_sk, _ = wots_keygen(fake_seed, target_idx, FAST)
-        fake_ots = wots_sign(fake_sk, b'forged', FAST, leaf_idx=target_idx)
-        fake_leaf = wots_recover_leaf(fake_ots, b'forged', FAST,
+        fake_sk, _ = wots_keygen(fake_seed, fk.pub_seed, target_idx, FAST)
+        fake_ots = wots_sign(fake_sk, b'forged', FAST, fk.pub_seed,
+                             leaf_idx=target_idx)
+        fake_leaf = wots_recover_leaf(fake_ots, b'forged', FAST, fk.pub_seed,
                                       leaf_idx=target_idx)
         assert fake_leaf != committed_leaf
 
-        # Fake leaf + correct auth path → wrong root
         root = merkle_root_from_leaf(fake_leaf, target_idx,
-                                     state.cached_siblings, FAST.n)
+                                     state.cached_siblings, FAST.n, pk.seed)
         assert root != pk.root
 
     def test_tight_reduction_target_is_predictable(self):
         """Unlike SPHINCS+ where the adversary adaptively chooses which
         FORS key to target (losing 2^h in the reduction), our adversary's
-        target is FIXED: it's always state.next_index. The reduction
-        knows which leaf to embed its challenge at."""
+        target is FIXED: it's always state.next_index."""
         fk, pk, state = _setup()
         for i in range(10):
-            assert state.next_index == i  # predictable
+            assert state.next_index == i
             sig = sign(fk, f'tx-{i}'.encode(), i)
             ok, state = verify_and_update(pk, f'tx-{i}'.encode(), sig, state)
             assert ok
@@ -391,16 +377,15 @@ class TestTheorem3_ManyTime_EUCMA:
         fk, pk, _ = _setup()
         leaf_real = fk.tree[0][0]
         auth = merkle_auth_path(fk.tree, 0)
-        root_real = merkle_root_from_leaf(leaf_real, 0, auth, n)
+        root_real = merkle_root_from_leaf(leaf_real, 0, auth, n, pk.seed)
         assert root_real == pk.root
 
-        # Try 1000 random "fake" leaves — none should produce the same root
         for _ in range(1000):
             fake = os.urandom(n)
             if fake == leaf_real:
                 continue
-            root_fake = merkle_root_from_leaf(fake, 0, auth, n)
-            assert root_fake != root_real  # collision would be extraordinary
+            root_fake = merkle_root_from_leaf(fake, 0, auth, n, pk.seed)
+            assert root_fake != root_real
 
 
 # ===================================================================
@@ -447,8 +432,7 @@ class TestTheorem4_DeltaEquivalence:
     @pytest.mark.parametrize("H", [3, 4, 5, 6, 7])
     def test_exhaustive_delta_equivalence(self, H):
         """For every leaf in a tree of height H, verify that the evolving
-        auth state matches the direct auth path. This is an EXHAUSTIVE
-        proof for the given H, not a sample."""
+        auth state matches the direct auth path."""
         p = Params(n=16, w=16, H=H)
         fk, pk, state = _setup(p)
 
@@ -474,27 +458,25 @@ class TestTheorem4_DeltaEquivalence:
         for i in range(p.max_sigs - 1):
             msg = f'tx-{i}'.encode()
             sig = sign(fk, msg, i)
-            _, pk_chains = wots_keygen(fk.seed, i, p)
-            leaf_hash = wots_pk_hash(pk_chains, p, leaf_idx=i)
+            _, pk_chains = wots_keygen(fk.seed, fk.pub_seed, i, p)
+            leaf_hash = wots_pk_hash(pk_chains, p, fk.pub_seed, leaf_idx=i)
 
             next_idx = i + 1
             M = merge_level(next_idx)
 
-            # Walk up M-1 levels manually
             node = leaf_hash
             idx = i
             for lv in range(M - 1):
                 sib = state.cached_siblings[lv]
                 parent_idx = idx >> 1
                 if idx & 1 == 0:
-                    node = merkle_node_hash(node, sib, p.n,
+                    node = merkle_node_hash(node, sib, p.n, pk.seed,
                                             level=lv + 1, index=parent_idx)
                 else:
-                    node = merkle_node_hash(sib, node, p.n,
+                    node = merkle_node_hash(sib, node, p.n, pk.seed,
                                             level=lv + 1, index=parent_idx)
                 idx >>= 1
 
-            # This should be the auth sibling for leaf i+1 at level M-1
             direct_auth = merkle_auth_path(fk.tree, next_idx)
             assert node == direct_auth[M - 1], (
                 f"i={i}: derived sibling at level {M-1} doesn't match"
@@ -510,9 +492,9 @@ class TestTheorem4_DeltaEquivalence:
 #
 #  Statement
 #  ---------
-#  Let H_addr(x) = SHA-256(domain || addr || x)[:n] be the tweaked hash.
-#  For any two distinct addresses addr₁ ≠ addr₂, H_{addr₁} and H_{addr₂}
-#  are independent random functions (in the random oracle model).
+#  Let H_addr(x) = SHA-256(domain || seed || addr || x)[:n] be the tweaked
+#  hash. For any two distinct addresses addr₁ ≠ addr₂, H_{addr₁} and
+#  H_{addr₂} are independent random functions (in the random oracle model).
 #
 #  Therefore, an adversary with access to T = 2^H target positions gains
 #  no multi-target advantage from BHT quantum collision-finding.  The
@@ -524,8 +506,9 @@ class TestTheorem4_DeltaEquivalence:
 #
 #  Proof
 #  -----
-#  In the Random Oracle Model (ROM), SHA-256(domain || addr || ·) for
-#  distinct (domain, addr) are independent random oracles.  Multi-target
+#  In the Random Oracle Model (ROM), SHA-256(domain || seed || addr || ·)
+#  for distinct (domain, addr) are independent random oracles.  The per-key
+#  public seed ensures cross-account independence as well.  Multi-target
 #  search across independent oracles reduces to single-target search on
 #  a randomly chosen oracle (at the cost of guessing which oracle the
 #  collision appears in, i.e., factor T).
@@ -550,12 +533,13 @@ class TestTheorem5_MultiTargetResistance:
         """Verify that the same data hashed at different addresses gives
         completely unrelated outputs (no multi-target correlation)."""
         data = b'same-input-data-for-all-positions'
+        ps = _TEST_PUB_SEED
         n = 16
         hashes = set()
         for leaf_idx in range(256):
-            h = hash_n(DOMAIN_LEAF, _leaf_addr(leaf_idx), data, n)
+            h = hash_n(DOMAIN_LEAF, ps, _leaf_addr(leaf_idx), data, n)
             hashes.add(h)
-        assert len(hashes) == 256  # all distinct
+        assert len(hashes) == 256
 
     def test_node_addresses_fully_distinguish_positions(self):
         """Every (level, index) pair produces a unique address."""
@@ -583,17 +567,10 @@ class TestTheorem5_MultiTargetResistance:
         p = Params(n=16, w=16, H=4)
         fk, pk, state = _setup(p)
 
-        # Get the level-1 node at position 0 (parent of leaves 0,1)
-        node_1_0 = fk.tree[1][0]
-        # And at position 1 (parent of leaves 2,3)
-        node_1_1 = fk.tree[1][1]
-
-        # Even if these happened to have the same children (they don't,
-        # but hypothetically), the tweaked hash ensures different results:
         left = fk.tree[0][0]
         right = fk.tree[0][1]
-        h_at_pos0 = merkle_node_hash(left, right, p.n, level=1, index=0)
-        h_at_pos1 = merkle_node_hash(left, right, p.n, level=1, index=1)
+        h_at_pos0 = merkle_node_hash(left, right, p.n, pk.seed, level=1, index=0)
+        h_at_pos1 = merkle_node_hash(left, right, p.n, pk.seed, level=1, index=1)
         assert h_at_pos0 != h_at_pos1
 
 
@@ -603,10 +580,10 @@ class TestTheorem5_MultiTargetResistance:
 #
 #  Statement
 #  ---------
-#  The chain-native stateful hash-based signature scheme with parameters
-#  (n, w, H) achieves EU-CMA security in the quantum random oracle model
-#  against adversaries making at most q_S signing queries and q_H hash
-#  queries, with advantage bounded by:
+#  The PUP scheme with parameters (n, w, H) achieves EU-CMA security
+#  in the quantum random oracle model against adversaries making at
+#  most q_S signing queries and q_H hash queries, with advantage
+#  bounded by:
 #
 #      ε ≤ ε_OTS + ε_COL
 #
@@ -654,13 +631,10 @@ class TestTheorem6_ConcreteBounds:
         l = l1 + l2
 
         chain_positions = l * (w - 1)
-        quantum_hash_bits = 4 * n  # Grover: 2^{4n} for n-byte hash
+        quantum_hash_bits = 4 * n
 
-        # OTS bound: break when q_H ≈ 2^{4n} / chain_positions
         log2_ots_security = quantum_hash_bits - math.log2(chain_positions)
 
-        # COL bound (BHT): q_H^{2/3} / 2^{8n/3}, solving for q_H
-        # q_H = (2^{8n/3} / H)^{3/2}
         log2_col_security = 1.5 * (8 * n / 3 - math.log2(H))
 
         bottleneck = min(log2_ots_security, log2_col_security)
@@ -687,7 +661,7 @@ class TestTheorem6_ConcreteBounds:
         print(f"  Bottleneck:                2^{b['bottleneck']:.1f}")
         print(f"  Avg sig size:              {b['avg_sig']:.0f} bytes")
 
-        assert b['bottleneck'] > 50  # well above 2^50
+        assert b['bottleneck'] > 50
 
     def test_comfortable_bounds(self):
         """n=20 (160-bit hash): comfortable 2^64+ margin."""
@@ -715,15 +689,6 @@ class TestTheorem6_ConcreteBounds:
         """SPHINCS+-128s has similar concrete bounds with n=16.
         Our scheme has a TIGHTER reduction (no 2^h FORS guessing loss)."""
         our = self._compute_bounds(16, 16, 20)
-
-        # SPHINCS+-128s concrete security (from the specification):
-        # The generic attack cost is dominated by:
-        # - WOTS+ chain inversion: similar to ours (same l, w, n)
-        # - FORS k-subset forgery: ~2^{k·a} ≈ 2^{14·6} = 2^84 (classical)
-        #   but quantum Grover: ~2^{42}
-        # - Hypertree reduction loses factor 2^{h/d} ≈ 2^9 from guessing
-        #   which subtree the forgery targets
-        # Our reduction: TIGHT (no guessing loss), target is predictable
 
         print(f"\n  === REDUCTION TIGHTNESS COMPARISON ===")
         print(f"  Our scheme:     TIGHT (target leaf = next_index, predictable)")
@@ -771,7 +736,7 @@ class TestTheorem7_NoAdaptiveLeafChoice:
         fk, pk, state = _setup()
         for i in range(FAST.max_sigs - 1):
             target = state.next_index
-            assert target == i  # completely deterministic
+            assert target == i
 
             msg = f'tx-{i}'.encode()
             sig = sign(fk, msg, i)
@@ -780,43 +745,32 @@ class TestTheorem7_NoAdaptiveLeafChoice:
 
     def test_adversary_cannot_choose_weak_leaf(self):
         """In a non-blockchain stateful scheme, an adversary might choose
-        to attack a leaf whose W-OTS+ key has a 'weak' structure (e.g.,
-        many zero digits for some message).  Here, the leaf is fixed."""
+        to attack a leaf whose W-OTS+ key has a 'weak' structure. Here,
+        the leaf is fixed."""
         fk, pk, state = _setup()
 
-        # Suppose the adversary wants to attack leaf 42 (arbitrary choice)
-        # because it has some favorable property.  They CANNOT:
-        # they must sign 0, 1, 2, ... sequentially.
         sig42 = sign(fk, b'attack-leaf-42', 42)
         ok, _ = verify_and_update(pk, b'attack-leaf-42', sig42, state)
-        assert not ok  # rejected: expected index 0, got 42
+        assert not ok
 
     def test_known_message_reduction(self):
-        """The reduction from EU-CMA to EU-NMA (known-message attack on
-        W-OTS+): since the target leaf is known in advance, the reduction
-        can prepare the W-OTS+ challenge key at that position without
-        loss."""
-        # Simulate: reduction embeds a challenge W-OTS+ public key at
-        # leaf next_index and simulates all other leaves normally.
+        """The reduction from EU-CMA to EU-NMA: since the target leaf is
+        known in advance, the reduction can prepare the W-OTS+ challenge
+        key at that position without loss."""
         p = Params(n=16, w=16, H=4)
         fk, pk, state = _setup(p)
 
-        # Sign 5 messages to advance to index 5
         for i in range(5):
             sig = sign(fk, f'tx-{i}'.encode(), i)
             ok, state = verify_and_update(pk, f'tx-{i}'.encode(), sig, state)
             assert ok
 
-        target = state.next_index  # = 5, known to the reduction
+        target = state.next_index
         assert target == 5
 
-        # The reduction knows the W-OTS+ public key at leaf 5:
-        _, target_pk = wots_keygen(fk.seed, target, p)
-        target_leaf = wots_pk_hash(target_pk, p, leaf_idx=target)
+        _, target_pk = wots_keygen(fk.seed, fk.pub_seed, target, p)
+        target_leaf = wots_pk_hash(target_pk, p, fk.pub_seed, leaf_idx=target)
         assert target_leaf == fk.tree[0][target]
-
-        # Any forgery at index 5 MUST produce this exact leaf hash
-        # (or find a collision), giving the reduction a W-OTS+ forgery.
 
 
 if __name__ == '__main__':

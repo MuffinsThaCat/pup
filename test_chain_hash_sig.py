@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test suite for the chain-native stateful hash-based signature scheme.
+Test suite for PUP — Post-quantum Unicity Protocol.
 
 Proves correctness, security properties, delta-compression theory, and
 measures concrete sizes vs SPHINCS+ / Falcon / XMSS.
@@ -36,6 +36,9 @@ FAST = Params(n=16, w=16, H=6)   # 64 leaves — fast
 MED  = Params(n=16, w=16, H=8)   # 256 leaves
 FULL = Params(n=16, w=16, H=10)  # 1024 leaves — closer to production shape
 
+# Shared public seed for tests that call low-level functions directly
+_TEST_PUB_SEED = b'pub-seed-16bytes'
+
 def _make_keys(p: Params, seed: bytes = b'test-seed-32-bytes-exactly!!1234'):
     fk, pk = keygen(p, seed=seed)
     leaf_hash, auth_0 = registration_data(fk)
@@ -52,16 +55,18 @@ class TestWOTSPlus:
     def test_keygen_deterministic(self):
         p = FAST
         seed = b'deterministic-seed-exactly32byte'
-        sk1, pk1 = wots_keygen(seed, 0, p)
-        sk2, pk2 = wots_keygen(seed, 0, p)
+        ps = _TEST_PUB_SEED
+        sk1, pk1 = wots_keygen(seed, ps, 0, p)
+        sk2, pk2 = wots_keygen(seed, ps, 0, p)
         assert sk1 == sk2
         assert pk1 == pk2
 
     def test_keygen_different_leaves(self):
         p = FAST
         seed = b'deterministic-seed-exactly32byte'
-        _, pk0 = wots_keygen(seed, 0, p)
-        _, pk1 = wots_keygen(seed, 1, p)
+        ps = _TEST_PUB_SEED
+        _, pk0 = wots_keygen(seed, ps, 0, p)
+        _, pk1 = wots_keygen(seed, ps, 1, p)
         assert pk0 != pk1
 
     def test_chain_count(self):
@@ -73,47 +78,52 @@ class TestWOTSPlus:
     def test_sign_verify_roundtrip(self):
         p = FAST
         seed = os.urandom(32)
-        sk, pk = wots_keygen(seed, 0, p)
+        ps = os.urandom(p.n)
+        sk, pk = wots_keygen(seed, ps, 0, p)
         msg = b'hello world'
-        sig = wots_sign(sk, msg, p, leaf_idx=0)
-        assert wots_verify(sig, msg, pk, p, leaf_idx=0)
+        sig = wots_sign(sk, msg, p, ps, leaf_idx=0)
+        assert wots_verify(sig, msg, pk, p, ps, leaf_idx=0)
 
     def test_recover_leaf_matches(self):
         p = FAST
         seed = os.urandom(32)
-        sk, pk = wots_keygen(seed, 0, p)
+        ps = os.urandom(p.n)
+        sk, pk = wots_keygen(seed, ps, 0, p)
         msg = b'test message'
-        sig = wots_sign(sk, msg, p, leaf_idx=0)
-        leaf = wots_recover_leaf(sig, msg, p, leaf_idx=0)
-        expected_leaf = wots_pk_hash(pk, p, leaf_idx=0)
+        sig = wots_sign(sk, msg, p, ps, leaf_idx=0)
+        leaf = wots_recover_leaf(sig, msg, p, ps, leaf_idx=0)
+        expected_leaf = wots_pk_hash(pk, p, ps, leaf_idx=0)
         assert leaf == expected_leaf
 
     def test_wrong_message_rejected(self):
         p = FAST
         seed = os.urandom(32)
-        sk, pk = wots_keygen(seed, 0, p)
-        sig = wots_sign(sk, b'correct', p, leaf_idx=0)
-        assert not wots_verify(sig, b'wrong', pk, p, leaf_idx=0)
+        ps = os.urandom(p.n)
+        sk, pk = wots_keygen(seed, ps, 0, p)
+        sig = wots_sign(sk, b'correct', p, ps, leaf_idx=0)
+        assert not wots_verify(sig, b'wrong', pk, p, ps, leaf_idx=0)
 
     def test_tampered_sig_rejected(self):
         p = FAST
         seed = os.urandom(32)
-        sk, pk = wots_keygen(seed, 0, p)
+        ps = os.urandom(p.n)
+        sk, pk = wots_keygen(seed, ps, 0, p)
         msg = b'important'
-        sig = wots_sign(sk, msg, p, leaf_idx=0)
+        sig = wots_sign(sk, msg, p, ps, leaf_idx=0)
         tampered = list(sig)
         tampered[0] = bytes(p.n)
-        assert not wots_verify(tampered, msg, pk, p, leaf_idx=0)
+        assert not wots_verify(tampered, msg, pk, p, ps, leaf_idx=0)
 
     def test_wrong_key_rejected(self):
         p = FAST
+        ps = os.urandom(p.n)
         seed1 = os.urandom(32)
         seed2 = os.urandom(32)
-        sk1, _ = wots_keygen(seed1, 0, p)
-        _, pk2 = wots_keygen(seed2, 0, p)
+        sk1, _ = wots_keygen(seed1, ps, 0, p)
+        _, pk2 = wots_keygen(seed2, ps, 0, p)
         msg = b'message'
-        sig = wots_sign(sk1, msg, p, leaf_idx=0)
-        assert not wots_verify(sig, msg, pk2, p, leaf_idx=0)
+        sig = wots_sign(sk1, msg, p, ps, leaf_idx=0)
+        assert not wots_verify(sig, msg, pk2, p, ps, leaf_idx=0)
 
     def test_sig_size(self):
         p = Params(n=16, w=16, H=6)
@@ -128,9 +138,10 @@ class TestWOTSPlus:
     def test_checksum_consistency(self):
         """Signer and verifier compute the same digit sequence."""
         p = FAST
+        ps = _TEST_PUB_SEED
         msg = os.urandom(32)
-        d1 = _all_digits(msg, p)
-        d2 = _all_digits(msg, p)
+        d1 = _all_digits(msg, p, ps)
+        d2 = _all_digits(msg, p, ps)
         assert d1 == d2
         assert len(d1) == p.l
 
@@ -138,8 +149,9 @@ class TestWOTSPlus:
         """Without checksum, attacker could advance chains. Checksum digits
         go in the OPPOSITE direction, making this impossible."""
         p = FAST
+        ps = _TEST_PUB_SEED
         msg = os.urandom(32)
-        digits = _all_digits(msg, p)
+        digits = _all_digits(msg, p, ps)
         msg_digits = digits[:p.l1]
         cs_digits = digits[p.l1:]
         csum = sum(p.w - 1 - d for d in msg_digits)
@@ -154,56 +166,63 @@ class TestWOTSPlus:
 class TestMerkleTree:
 
     def test_single_leaf(self):
-        leaf = hash_n(DOMAIN_LEAF, _leaf_addr(0), b'only-leaf', 16)
-        tree = build_merkle_tree([leaf], 16)
+        ps = _TEST_PUB_SEED
+        leaf = hash_n(DOMAIN_LEAF, ps, _leaf_addr(0), b'only-leaf', 16)
+        tree = build_merkle_tree([leaf], 16, ps)
         assert tree[-1][0] == leaf
 
     def test_two_leaves(self):
-        l0 = hash_n(DOMAIN_LEAF, _leaf_addr(0), b'leaf0', 16)
-        l1 = hash_n(DOMAIN_LEAF, _leaf_addr(1), b'leaf1', 16)
-        tree = build_merkle_tree([l0, l1], 16)
-        expected_root = merkle_node_hash(l0, l1, 16, level=1, index=0)
+        ps = _TEST_PUB_SEED
+        l0 = hash_n(DOMAIN_LEAF, ps, _leaf_addr(0), b'leaf0', 16)
+        l1 = hash_n(DOMAIN_LEAF, ps, _leaf_addr(1), b'leaf1', 16)
+        tree = build_merkle_tree([l0, l1], 16, ps)
+        expected_root = merkle_node_hash(l0, l1, 16, ps, level=1, index=0)
         assert tree[-1][0] == expected_root
 
     def test_auth_path_verifies(self):
         n = 16
-        leaves = [hash_n(DOMAIN_LEAF, _leaf_addr(i), f'leaf-{i}'.encode(), n)
+        ps = _TEST_PUB_SEED
+        leaves = [hash_n(DOMAIN_LEAF, ps, _leaf_addr(i), f'leaf-{i}'.encode(), n)
                   for i in range(8)]
-        tree = build_merkle_tree(leaves, n)
+        tree = build_merkle_tree(leaves, n, ps)
         root = tree[-1][0]
         for i in range(8):
             path = merkle_auth_path(tree, i)
-            assert merkle_root_from_leaf(leaves[i], i, path, n) == root
+            assert merkle_root_from_leaf(leaves[i], i, path, n, ps) == root
 
     def test_wrong_leaf_rejected(self):
         n = 16
-        leaves = [hash_n(DOMAIN_LEAF, _leaf_addr(i), f'leaf-{i}'.encode(), n)
+        ps = _TEST_PUB_SEED
+        leaves = [hash_n(DOMAIN_LEAF, ps, _leaf_addr(i), f'leaf-{i}'.encode(), n)
                   for i in range(4)]
-        tree = build_merkle_tree(leaves, n)
+        tree = build_merkle_tree(leaves, n, ps)
         root = tree[-1][0]
         path = merkle_auth_path(tree, 0)
-        fake_leaf = hash_n(DOMAIN_LEAF, _leaf_addr(0), b'fake', n)
-        assert merkle_root_from_leaf(fake_leaf, 0, path, n) != root
+        fake_leaf = hash_n(DOMAIN_LEAF, ps, _leaf_addr(0), b'fake', n)
+        assert merkle_root_from_leaf(fake_leaf, 0, path, n, ps) != root
 
     def test_wrong_index_rejected(self):
         n = 16
-        leaves = [hash_n(DOMAIN_LEAF, _leaf_addr(i), f'leaf-{i}'.encode(), n)
+        ps = _TEST_PUB_SEED
+        leaves = [hash_n(DOMAIN_LEAF, ps, _leaf_addr(i), f'leaf-{i}'.encode(), n)
                   for i in range(4)]
-        tree = build_merkle_tree(leaves, n)
+        tree = build_merkle_tree(leaves, n, ps)
         root = tree[-1][0]
         path = merkle_auth_path(tree, 0)
-        assert merkle_root_from_leaf(leaves[0], 1, path, n) != root
+        assert merkle_root_from_leaf(leaves[0], 1, path, n, ps) != root
 
     def test_domain_separation(self):
+        ps = _TEST_PUB_SEED
         addr = b'\x00\x00\x00\x00'
         data = b'same-data'
-        assert hash_n(DOMAIN_LEAF, addr, data, 16) != hash_n(DOMAIN_NODE, addr, data, 16)
-        assert hash_n(DOMAIN_NODE, addr, data, 16) != hash_n(DOMAIN_CHAIN, addr, data, 16)
+        assert hash_n(DOMAIN_LEAF, ps, addr, data, 16) != hash_n(DOMAIN_NODE, ps, addr, data, 16)
+        assert hash_n(DOMAIN_NODE, ps, addr, data, 16) != hash_n(DOMAIN_CHAIN, ps, addr, data, 16)
 
     def test_tree_levels_correct(self):
         n = 16
+        ps = _TEST_PUB_SEED
         leaves = [os.urandom(n) for _ in range(8)]
-        tree = build_merkle_tree(leaves, n)
+        tree = build_merkle_tree(leaves, n, ps)
         assert len(tree) == 4  # 8 leaves → levels: 8, 4, 2, 1
         assert len(tree[0]) == 8
         assert len(tree[1]) == 4
@@ -211,35 +230,44 @@ class TestMerkleTree:
         assert len(tree[3]) == 1
 
     def test_address_tweaking_prevents_cross_position(self):
-        """Same children at different positions produce different parent hashes.
-        Without tweaking, an attacker could transplant a subtree from one
-        position to another. With tweaking, each position is independent."""
+        """Same children at different positions produce different parent hashes."""
         n = 16
+        ps = _TEST_PUB_SEED
         left = os.urandom(n)
         right = os.urandom(n)
-        h_pos0 = merkle_node_hash(left, right, n, level=1, index=0)
-        h_pos1 = merkle_node_hash(left, right, n, level=1, index=1)
-        h_lv2  = merkle_node_hash(left, right, n, level=2, index=0)
-        assert h_pos0 != h_pos1  # same data, different position → different hash
-        assert h_pos0 != h_lv2   # same data, different level → different hash
+        h_pos0 = merkle_node_hash(left, right, n, ps, level=1, index=0)
+        h_pos1 = merkle_node_hash(left, right, n, ps, level=1, index=1)
+        h_lv2  = merkle_node_hash(left, right, n, ps, level=2, index=0)
+        assert h_pos0 != h_pos1
+        assert h_pos0 != h_lv2
 
     def test_leaf_tweaking_prevents_cross_leaf(self):
         """Same OTS public key at different leaf positions produces different leaf hashes."""
         p = FAST
+        ps = _TEST_PUB_SEED
         pk_data = [os.urandom(p.n) for _ in range(p.l)]
-        h0 = wots_pk_hash(pk_data, p, leaf_idx=0)
-        h1 = wots_pk_hash(pk_data, p, leaf_idx=1)
+        h0 = wots_pk_hash(pk_data, p, ps, leaf_idx=0)
+        h1 = wots_pk_hash(pk_data, p, ps, leaf_idx=1)
         assert h0 != h1
 
     def test_chain_tweaking_prevents_cross_chain(self):
         """Same secret at different (leaf, chain) positions produces different output."""
         p = FAST
+        ps = _TEST_PUB_SEED
         secret = os.urandom(p.n)
-        v_chain0 = wots_chain(secret, 0, 5, p.n, leaf_idx=0, chain_idx=0)
-        v_chain1 = wots_chain(secret, 0, 5, p.n, leaf_idx=0, chain_idx=1)
-        v_leaf1  = wots_chain(secret, 0, 5, p.n, leaf_idx=1, chain_idx=0)
+        v_chain0 = wots_chain(secret, 0, 5, p.n, ps, leaf_idx=0, chain_idx=0)
+        v_chain1 = wots_chain(secret, 0, 5, p.n, ps, leaf_idx=0, chain_idx=1)
+        v_leaf1  = wots_chain(secret, 0, 5, p.n, ps, leaf_idx=1, chain_idx=0)
         assert v_chain0 != v_chain1
         assert v_chain0 != v_leaf1
+
+    def test_different_seeds_different_hashes(self):
+        """Different public seeds produce different hash outputs — accounts are independent."""
+        ps1 = os.urandom(16)
+        ps2 = os.urandom(16)
+        addr = _leaf_addr(0)
+        data = b'same-data'
+        assert hash_n(DOMAIN_LEAF, ps1, addr, data, 16) != hash_n(DOMAIN_LEAF, ps2, addr, data, 16)
 
 
 # ===================================================================
@@ -272,14 +300,12 @@ class TestDeltaCompression:
             assert merge_level(i) == v2 + 1, f"failed at i={i}"
 
     def test_delta_count_sequence(self):
-        # delta_count = merge_level - 1 = v2(i) for i>=1, 0 for i=0
         expected = [0, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 4]
         for i, exp in enumerate(expected):
             assert delta_count(i) == exp, f"delta_count({i})={delta_count(i)}, expected {exp}"
 
     def test_average_delta_converges_to_1(self):
-        """Theoretical prediction: E[delta_count] = E[v2(i)] = 1 for uniform i>=1.
-        The level M-1 sibling is derived by the verifier, so we send M-1 not M."""
+        """Theoretical prediction: E[delta_count] = E[v2(i)] = 1 for uniform i>=1."""
         N = 10000
         total = sum(delta_count(i) for i in range(1, N + 1))
         avg = total / N
@@ -288,7 +314,7 @@ class TestDeltaCompression:
     def test_delta_never_exceeds_tree_height(self):
         H = 10
         for i in range(1, 1 << H):
-            assert delta_count(i) < H  # strictly less (M-1 < H)
+            assert delta_count(i) < H
 
     def test_half_of_transitions_have_zero_delta(self):
         """Odd target indices have merge_level=1, delta_count=0 (derivable)."""
@@ -299,7 +325,7 @@ class TestDeltaCompression:
     def test_worst_case_at_powers_of_2(self):
         for k in range(1, 12):
             i = 1 << k
-            assert delta_count(i) == k  # v2(2^k) = k
+            assert delta_count(i) == k
 
 
 # ===================================================================
@@ -311,6 +337,9 @@ class TestSchemeEndToEnd:
     def test_keygen_produces_valid_keys(self):
         fk, pk = keygen(FAST)
         assert len(pk.root) == FAST.n
+        assert len(pk.seed) == FAST.n
+        assert len(fk.pub_seed) == FAST.n
+        assert pk.seed == fk.pub_seed
         assert len(fk.tree) == FAST.H + 1
         assert len(fk.tree[0]) == FAST.max_sigs
 
@@ -446,9 +475,9 @@ class TestSecurity:
 
     def test_different_messages_different_sigs(self):
         fk, pk = keygen(FAST, seed=b'fixed-seed-exactly-32-bytes!!!!!')
-        sk, _ = wots_keygen(fk.seed, 0, FAST)
-        sig_a = wots_sign(sk, b'message A', FAST, leaf_idx=0)
-        sig_b = wots_sign(sk, b'message B', FAST, leaf_idx=0)
+        sk, _ = wots_keygen(fk.seed, fk.pub_seed, 0, FAST)
+        sig_a = wots_sign(sk, b'message A', FAST, fk.pub_seed, leaf_idx=0)
+        sig_b = wots_sign(sk, b'message B', FAST, fk.pub_seed, leaf_idx=0)
         assert sig_a != sig_b
 
     def test_tampered_delta_rejected_immediately(self):
@@ -465,7 +494,7 @@ class TestSecurity:
         if bad_delta:
             bad_sig1 = Signature(index=1, ots_sig=sig1.ots_sig, delta=bad_delta)
             ok, _ = verify_and_update(pk, b'tx-1', bad_sig1, state)
-            assert not ok  # bound payload: delta tampering fails immediately
+            assert not ok
 
 
 # ===================================================================
@@ -550,14 +579,14 @@ class TestSizeMeasurements:
         p = Params(n=16, w=16, H=20)
 
         our_ots = p.ots_sig_bytes
-        our_avg_delta = 1.0 * p.n  # E[delta_count] = E[v2(i)] = 1 hash
+        our_avg_delta = 1.0 * p.n
         our_avg_sig = our_ots + 4 + our_avg_delta
         our_max_delta = (p.H - 1) * p.n
         our_max_sig = our_ots + 4 + our_max_delta
 
         sphincs_sig = 7856
         falcon_sig = 666
-        xmss_sig = p.l * p.n + p.H * p.n  # OTS + full auth path
+        xmss_sig = p.l * p.n + p.H * p.n
 
         print(f"\n  === SIGNATURE SIZE COMPARISON (NIST Level I, 128-bit PQ) ===")
         print(f"  {'Scheme':<25} {'Sig (bytes)':<15} {'Assumptions':<15}")
@@ -583,18 +612,19 @@ class TestSizeMeasurements:
         assert state_bytes == 20 * 16 + 4  # 324 bytes
 
     def test_public_key_size(self):
+        """PK = (R, seed) = n + n = 2n bytes."""
         p = Params(n=16, w=16, H=20)
-        pk_size = p.n  # just the Merkle root
-        assert pk_size == 16
+        pk_size = 2 * p.n  # root + public seed
+        assert pk_size == 32
 
     def test_registration_overhead(self):
         """One-time cost at account creation."""
         p = Params(n=16, w=16, H=20)
         leaf_hash_size = p.n
         auth_path_size = p.H * p.n
-        total = leaf_hash_size + auth_path_size + p.n  # leaf + auth + pubkey
+        total = leaf_hash_size + auth_path_size + 2 * p.n  # leaf + auth + pubkey (root+seed)
         print(f"\n  Registration overhead: {total} bytes (one-time)")
-        assert total == 16 + 320 + 16  # 352 bytes
+        assert total == 16 + 320 + 32  # 368 bytes
 
 
 # ===================================================================
@@ -611,7 +641,7 @@ class TestVerifyCost:
         path_hashes = p.H
         total = total_verify_hashes + path_hashes
 
-        sphincs_verify_hashes = 15000  # approximate
+        sphincs_verify_hashes = 15000
 
         print(f"\n  === VERIFY COST (hash evaluations) ===")
         print(f"  W-OTS+ chains: {p.l} × {avg_steps_per_chain:.1f} avg = {total_verify_hashes:.0f}")
@@ -753,10 +783,21 @@ class TestEdgeCases:
         assert state.next_index == 2
 
     def test_deterministic_keygen(self):
+        """Keygen is deterministic given the same sk seed and pub seed."""
         seed = b'reproducible-seed-32-bytes!!!!!!!'
         fk1, pk1 = keygen(FAST, seed=seed)
-        fk2, pk2 = keygen(FAST, seed=seed)
-        assert pk1.root == pk2.root
+        # keygen generates a random pub_seed each time, so roots will differ
+        # Determinism requires both seeds to match
+        fk2 = FullKey(seed=seed, pub_seed=fk1.pub_seed, params=FAST,
+                      tree=[], root=b'')
+        # Rebuild with same pub_seed
+        from chain_hash_sig import wots_keygen as wkg, wots_pk_hash as wph, build_merkle_tree as bmt
+        leaves = []
+        for i in range(FAST.max_sigs):
+            _, pk_chains = wkg(seed, fk1.pub_seed, i, FAST)
+            leaves.append(wph(pk_chains, FAST, fk1.pub_seed, leaf_idx=i))
+        tree = bmt(leaves, FAST.n, fk1.pub_seed)
+        assert tree[-1][0] == pk1.root
 
     def test_different_seeds_different_keys(self):
         _, pk1 = keygen(FAST, seed=os.urandom(32))
@@ -779,7 +820,7 @@ class TestBlockchainProperties:
         assert state.next_index == 1
 
         ok_replay, _ = verify_and_update(pk, b'tx-0', sig0, state)
-        assert not ok_replay  # nonce already consumed
+        assert not ok_replay
 
     def test_state_size_bounded(self):
         """On-chain state is O(H) regardless of how many sigs have been verified."""
@@ -791,12 +832,11 @@ class TestBlockchainProperties:
             sig = sign(fk, msg, i)
             ok, state = verify_and_update(pk, msg, sig, state)
             assert ok
-        assert state.size_bytes == initial_size  # size never grows
+        assert state.size_bytes == initial_size
 
     def test_independent_accounts(self):
         """Two accounts don't interfere with each other."""
         fk1, pk1, state1 = _make_keys(FAST)
-        fk2, pk2, state2 = _make_keys(Params(n=16, w=16, H=6))
         fk2, pk2 = keygen(Params(n=16, w=16, H=6), seed=os.urandom(32))
         leaf_hash2, auth_02 = registration_data(fk2)
         state2 = create_account(pk2, leaf_hash2, auth_02)
@@ -816,7 +856,7 @@ class TestBlockchainProperties:
         """At 100k TPS with diverse senders, measure DA savings vs SPHINCS+."""
         tps = 100_000
         sphincs_sig_bytes = 7856
-        our_avg_sig_bytes = 560 + 4 + 16  # OTS + index + ~1 hash delta
+        our_avg_sig_bytes = 560 + 4 + 16
 
         sphincs_bw = tps * sphincs_sig_bytes / 1e6
         our_bw = tps * our_avg_sig_bytes / 1e6
@@ -842,7 +882,7 @@ class TestCrossValidation:
         fk, pk = keygen(p)
         for i in range(p.max_sigs):
             path = merkle_auth_path(fk.tree, i)
-            root = merkle_root_from_leaf(fk.tree[0][i], i, path, p.n)
+            root = merkle_root_from_leaf(fk.tree[0][i], i, path, p.n, pk.seed)
             assert root == pk.root, f"leaf {i} auth path invalid"
 
     def test_evolving_state_matches_direct_path(self):
@@ -862,6 +902,29 @@ class TestCrossValidation:
                     f"evolved={state.cached_siblings[lv].hex()}, "
                     f"direct={direct_path[lv].hex()}"
                 )
+
+
+# ===================================================================
+# 14. BOUND PAYLOAD ENCODING
+# ===================================================================
+
+class TestBoundPayload:
+
+    def test_le64_encoding(self):
+        """Bound payload uses 8-byte little-endian length prefix."""
+        msg = b'hello'
+        bp = _bound_payload(msg, [])
+        assert bp[:8] == len(msg).to_bytes(8, 'little')
+        assert bp[8:] == msg
+
+    def test_bound_payload_includes_delta(self):
+        delta = [b'\x01' * 16, b'\x02' * 16]
+        msg = b'test'
+        bp = _bound_payload(msg, delta)
+        assert bp[:8] == (4).to_bytes(8, 'little')
+        assert bp[8:12] == msg
+        assert bp[12:28] == delta[0]
+        assert bp[28:44] == delta[1]
 
 
 if __name__ == '__main__':

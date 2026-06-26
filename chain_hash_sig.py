@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Chain-native stateful hash-based signature scheme.
+PUP — Post-quantum Unicity Protocol.
 
 A post-quantum signature construction that co-designs with blockchain state
 to achieve ~580-byte signatures (vs SPHINCS+ ~7856B) under hash-only assumptions.
@@ -22,31 +22,25 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Domain separation tags
+# Domain separation tags (four domains, per Section 2.1)
 # ---------------------------------------------------------------------------
 DOMAIN_LEAF  = b'\x00'
 DOMAIN_NODE  = b'\x01'
 DOMAIN_CHAIN = b'\x02'
-DOMAIN_PRF   = b'\x03'
-DOMAIN_MSG   = b'\x04'
+DOMAIN_MSG   = b'\x03'
 
 # ---------------------------------------------------------------------------
 # Address structure — every hash call gets a unique (domain, position) binding
 # to prevent multi-target quantum attacks (same role as SPHINCS+ ADRS).
-# Without this, an attacker with 2^H targets can exploit BHT collision-finding
-# across positions. With it, each hash is an independent function.
 # ---------------------------------------------------------------------------
 
 def _addr(leaf_idx: int, chain_idx: int, chain_step: int) -> bytes:
-    """W-OTS+ chain address: binds to (leaf, chain, step)."""
     return leaf_idx.to_bytes(4, 'big') + chain_idx.to_bytes(2, 'big') + chain_step.to_bytes(2, 'big')
 
 def _leaf_addr(leaf_idx: int) -> bytes:
-    """Leaf hash address: binds to leaf position."""
     return leaf_idx.to_bytes(4, 'big')
 
 def _node_addr(level: int, index: int) -> bytes:
-    """Internal node address: binds to (level, index) in the Merkle tree."""
     return level.to_bytes(2, 'big') + index.to_bytes(4, 'big')
 
 # ---------------------------------------------------------------------------
@@ -95,25 +89,25 @@ class Params:
 # Hash primitives
 # ---------------------------------------------------------------------------
 
-def hash_n(domain: bytes, addr: bytes, data: bytes, n: int) -> bytes:
-    """Position-tweaked hash: SHA-256(domain || addr || data)[:n].
-    The addr makes each call site a distinct function, defeating multi-target."""
-    return hashlib.sha256(domain + addr + data).digest()[:n]
+def hash_n(domain: bytes, seed: bytes, addr: bytes, data: bytes, n: int) -> bytes:
+    """Tweaked hash: H(domain || seed || addr || data)[:n].
+    The per-key public seed makes each account's hash family independent."""
+    return hashlib.sha256(domain + seed + addr + data).digest()[:n]
 
 
-def prf(seed: bytes, index: bytes, n: int) -> bytes:
-    return hmac.new(seed, index, hashlib.sha256).digest()[:n]
+def prf(sk_seed: bytes, index: bytes, n: int) -> bytes:
+    return hmac.new(sk_seed, index, hashlib.sha256).digest()[:n]
 
 
 # ---------------------------------------------------------------------------
 # W-OTS+ (Winternitz One-Time Signature Plus)
 # ---------------------------------------------------------------------------
 
-def wots_chain(x: bytes, start: int, steps: int, n: int,
+def wots_chain(x: bytes, start: int, steps: int, n: int, seed: bytes,
                leaf_idx: int = 0, chain_idx: int = 0) -> bytes:
     val = x
     for i in range(start, start + steps):
-        val = hash_n(DOMAIN_CHAIN, _addr(leaf_idx, chain_idx, i), val, n)
+        val = hash_n(DOMAIN_CHAIN, seed, _addr(leaf_idx, chain_idx, i), val, n)
     return val
 
 
@@ -147,74 +141,78 @@ def _checksum_bytes(msg_digits: list[int], p: Params) -> bytes:
     return csum.to_bytes(total_bytes, 'big')
 
 
-def _all_digits(msg: bytes, p: Params) -> list[int]:
-    msg_hash = hash_n(DOMAIN_MSG, b'', msg, p.n)
+def _all_digits(msg: bytes, p: Params, seed: bytes) -> list[int]:
+    msg_hash = hash_n(DOMAIN_MSG, seed, b'', msg, p.n)
     msg_digits = base_w(msg_hash, p.w, p.l1)
     cs_bytes = _checksum_bytes(msg_digits, p)
     cs_digits = base_w(cs_bytes, p.w, p.l2)
     return msg_digits + cs_digits
 
 
-def wots_keygen(seed: bytes, leaf_idx: int, p: Params) -> tuple[list[bytes], list[bytes]]:
+def wots_keygen(sk_seed: bytes, pub_seed: bytes, leaf_idx: int,
+                p: Params) -> tuple[list[bytes], list[bytes]]:
     sk, pk = [], []
     for chain_idx in range(p.l):
         idx_bytes = leaf_idx.to_bytes(4, 'big') + chain_idx.to_bytes(4, 'big')
-        sk_i = prf(seed, idx_bytes, p.n)
-        pk_i = wots_chain(sk_i, 0, p.w - 1, p.n,
+        sk_i = prf(sk_seed, idx_bytes, p.n)
+        pk_i = wots_chain(sk_i, 0, p.w - 1, p.n, seed=pub_seed,
                           leaf_idx=leaf_idx, chain_idx=chain_idx)
         sk.append(sk_i)
         pk.append(pk_i)
     return sk, pk
 
 
-def wots_pk_hash(pk_chains: list[bytes], p: Params, leaf_idx: int = 0) -> bytes:
-    return hash_n(DOMAIN_LEAF, _leaf_addr(leaf_idx), b''.join(pk_chains), p.n)
+def wots_pk_hash(pk_chains: list[bytes], p: Params, pub_seed: bytes,
+                 leaf_idx: int = 0) -> bytes:
+    return hash_n(DOMAIN_LEAF, pub_seed, _leaf_addr(leaf_idx),
+                  b''.join(pk_chains), p.n)
 
 
-def wots_sign(sk_chains: list[bytes], msg: bytes, p: Params,
+def wots_sign(sk_chains: list[bytes], msg: bytes, p: Params, pub_seed: bytes,
               leaf_idx: int = 0) -> list[bytes]:
-    digits = _all_digits(msg, p)
-    return [wots_chain(sk_chains[i], 0, d, p.n,
+    digits = _all_digits(msg, p, pub_seed)
+    return [wots_chain(sk_chains[i], 0, d, p.n, seed=pub_seed,
                        leaf_idx=leaf_idx, chain_idx=i)
             for i, d in enumerate(digits)]
 
 
 def wots_verify(sig_chains: list[bytes], msg: bytes, pk_chains: list[bytes],
-                p: Params, leaf_idx: int = 0) -> bool:
-    digits = _all_digits(msg, p)
+                p: Params, pub_seed: bytes, leaf_idx: int = 0) -> bool:
+    digits = _all_digits(msg, p, pub_seed)
     for i, d in enumerate(digits):
-        if wots_chain(sig_chains[i], d, p.w - 1 - d, p.n,
+        if wots_chain(sig_chains[i], d, p.w - 1 - d, p.n, seed=pub_seed,
                       leaf_idx=leaf_idx, chain_idx=i) != pk_chains[i]:
             return False
     return True
 
 
 def wots_recover_leaf(sig_chains: list[bytes], msg: bytes, p: Params,
-                      leaf_idx: int = 0) -> bytes:
-    digits = _all_digits(msg, p)
-    recovered_pk = [wots_chain(sig_chains[i], d, p.w - 1 - d, p.n,
+                      pub_seed: bytes, leaf_idx: int = 0) -> bytes:
+    digits = _all_digits(msg, p, pub_seed)
+    recovered_pk = [wots_chain(sig_chains[i], d, p.w - 1 - d, p.n, seed=pub_seed,
                                leaf_idx=leaf_idx, chain_idx=i)
                     for i, d in enumerate(digits)]
-    return wots_pk_hash(recovered_pk, p, leaf_idx=leaf_idx)
+    return wots_pk_hash(recovered_pk, p, pub_seed, leaf_idx=leaf_idx)
 
 
 # ---------------------------------------------------------------------------
 # Merkle tree
 # ---------------------------------------------------------------------------
 
-def merkle_node_hash(left: bytes, right: bytes, n: int,
+def merkle_node_hash(left: bytes, right: bytes, n: int, seed: bytes,
                      level: int = 0, index: int = 0) -> bytes:
-    return hash_n(DOMAIN_NODE, _node_addr(level, index), left + right, n)
+    return hash_n(DOMAIN_NODE, seed, _node_addr(level, index), left + right, n)
 
 
-def build_merkle_tree(leaves: list[bytes], n: int) -> list[list[bytes]]:
+def build_merkle_tree(leaves: list[bytes], n: int,
+                      seed: bytes) -> list[list[bytes]]:
     levels = [leaves]
     current = leaves
     lv = 1
     while len(current) > 1:
         nxt = []
         for i in range(0, len(current), 2):
-            nxt.append(merkle_node_hash(current[i], current[i + 1], n,
+            nxt.append(merkle_node_hash(current[i], current[i + 1], n, seed,
                                         level=lv, index=i // 2))
         levels.append(nxt)
         current = nxt
@@ -232,15 +230,18 @@ def merkle_auth_path(tree: list[list[bytes]], leaf_idx: int) -> list[bytes]:
 
 
 def merkle_root_from_leaf(leaf_hash: bytes, leaf_idx: int,
-                          auth_path: list[bytes], n: int) -> bytes:
+                          auth_path: list[bytes], n: int,
+                          seed: bytes) -> bytes:
     cur = leaf_hash
     idx = leaf_idx
     for lv, sibling in enumerate(auth_path):
         parent_idx = idx >> 1
         if idx & 1 == 0:
-            cur = merkle_node_hash(cur, sibling, n, level=lv + 1, index=parent_idx)
+            cur = merkle_node_hash(cur, sibling, n, seed,
+                                   level=lv + 1, index=parent_idx)
         else:
-            cur = merkle_node_hash(sibling, cur, n, level=lv + 1, index=parent_idx)
+            cur = merkle_node_hash(sibling, cur, n, seed,
+                                   level=lv + 1, index=parent_idx)
         idx >>= 1
     return cur
 
@@ -275,7 +276,8 @@ def delta_count(target_index: int) -> int:
 
 @dataclass
 class FullKey:
-    seed: bytes
+    seed: bytes       # secret seed (sk in the paper)
+    pub_seed: bytes   # public seed (seed in the paper)
     params: Params
     tree: list[list[bytes]]
     root: bytes
@@ -284,6 +286,7 @@ class FullKey:
 @dataclass
 class PublicKey:
     root: bytes
+    seed: bytes       # public seed
     params: Params
 
 
@@ -317,23 +320,25 @@ class Signature:
 def keygen(p: Params, seed: Optional[bytes] = None) -> tuple[FullKey, PublicKey]:
     if seed is None:
         seed = os.urandom(32)
+    pub_seed = os.urandom(p.n)
 
     leaves = []
     for i in range(p.max_sigs):
-        _, pk_chains = wots_keygen(seed, i, p)
-        leaves.append(wots_pk_hash(pk_chains, p, leaf_idx=i))
+        _, pk_chains = wots_keygen(seed, pub_seed, i, p)
+        leaves.append(wots_pk_hash(pk_chains, p, pub_seed, leaf_idx=i))
 
-    tree = build_merkle_tree(leaves, p.n)
+    tree = build_merkle_tree(leaves, p.n, pub_seed)
     root = tree[-1][0]
 
-    fk = FullKey(seed=seed, params=p, tree=tree, root=root)
-    pk = PublicKey(root=root, params=p)
+    fk = FullKey(seed=seed, pub_seed=pub_seed, params=p, tree=tree, root=root)
+    pk = PublicKey(root=root, seed=pub_seed, params=p)
     return fk, pk
 
 
 def create_account(pk: PublicKey, leaf_0_hash: bytes,
                    auth_path_0: list[bytes]) -> Optional[AuthState]:
-    computed_root = merkle_root_from_leaf(leaf_0_hash, 0, auth_path_0, pk.params.n)
+    computed_root = merkle_root_from_leaf(leaf_0_hash, 0, auth_path_0,
+                                          pk.params.n, pk.seed)
     if computed_root != pk.root:
         return None
     return AuthState(next_index=0, cached_siblings=list(auth_path_0))
@@ -347,8 +352,8 @@ def registration_data(fk: FullKey) -> tuple[bytes, list[bytes]]:
 
 def _bound_payload(msg: bytes, delta: list[bytes]) -> bytes:
     """Bind the message and delta into a single payload for OTS signing.
-    This prevents a block proposer from tampering with delta in transit."""
-    length = len(msg).to_bytes(4, 'big')
+    LE64 length prefix per the paper specification."""
+    length = len(msg).to_bytes(8, 'little')
     return length + msg + b''.join(delta)
 
 
@@ -356,7 +361,7 @@ def sign(fk: FullKey, msg: bytes, index: int) -> Signature:
     p = fk.params
     assert 0 <= index < p.max_sigs
 
-    sk_chains, _ = wots_keygen(fk.seed, index, p)
+    sk_chains, _ = wots_keygen(fk.seed, fk.pub_seed, index, p)
 
     target_next = index + 1
     dc = delta_count(target_next) if target_next < p.max_sigs else 0
@@ -367,7 +372,7 @@ def sign(fk: FullKey, msg: bytes, index: int) -> Signature:
         delta.append(fk.tree[level][sibling_idx])
 
     bound = _bound_payload(msg, delta)
-    ots_sig = wots_sign(sk_chains, bound, p, leaf_idx=index)
+    ots_sig = wots_sign(sk_chains, bound, p, fk.pub_seed, leaf_idx=index)
 
     return Signature(index=index, ots_sig=ots_sig, delta=delta)
 
@@ -382,9 +387,11 @@ def verify_and_update(pk: PublicKey, msg: bytes, sig: Signature,
         return False, None
 
     bound = _bound_payload(msg, sig.delta)
-    leaf_hash = wots_recover_leaf(sig.ots_sig, bound, p, leaf_idx=sig.index)
+    leaf_hash = wots_recover_leaf(sig.ots_sig, bound, p, pk.seed,
+                                  leaf_idx=sig.index)
 
-    root = merkle_root_from_leaf(leaf_hash, sig.index, state.cached_siblings, p.n)
+    root = merkle_root_from_leaf(leaf_hash, sig.index, state.cached_siblings,
+                                 p.n, pk.seed)
     if root != pk.root:
         return False, None
 
@@ -396,24 +403,21 @@ def verify_and_update(pk: PublicKey, msg: bytes, sig: Signature,
 
     M = merge_level(next_idx)
 
-    # Derive the sibling at the highest changed level (M-1) by walking
-    # up M-1 levels from the just-verified leaf using the OLD cached siblings.
-    # After M-1 steps, `node` = the subtree root that becomes the new
-    # sibling at level M-1 for the next leaf.
     node = leaf_hash
     idx = sig.index
     for lv in range(min(M - 1, p.H)):
         sib = state.cached_siblings[lv]
         parent_idx = idx >> 1
         if idx & 1 == 0:
-            node = merkle_node_hash(node, sib, p.n, level=lv + 1, index=parent_idx)
+            node = merkle_node_hash(node, sib, p.n, pk.seed,
+                                    level=lv + 1, index=parent_idx)
         else:
-            node = merkle_node_hash(sib, node, p.n, level=lv + 1, index=parent_idx)
+            node = merkle_node_hash(sib, node, p.n, pk.seed,
+                                    level=lv + 1, index=parent_idx)
         idx >>= 1
     if M - 1 < p.H:
         new_siblings[M - 1] = node
 
-    # Apply the delta: levels 0..M-2 are genuinely new (not derivable)
     for di in range(len(sig.delta)):
         new_siblings[di] = sig.delta[di]
 

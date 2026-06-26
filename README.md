@@ -12,7 +12,7 @@ A post-quantum signature scheme that produces **~580-byte signatures** (vs SPHIN
 
 ## How It Works
 
-Blockchains already enforce sequential per-account nonces. PUP binds the signature leaf index to the transaction nonce, eliminating the catastrophic leaf-reuse weakness of stateful hash-based signatures. The chain caches each account's Merkle authentication path (~328 bytes) and the signer sends only the delta — an average of one hash (16 bytes) per signature.
+Blockchains already enforce sequential per-account nonces. PUP binds the signature leaf index to the transaction nonce, eliminating the catastrophic leaf-reuse weakness of stateful hash-based signatures. The chain caches each account's Merkle authentication path (~324 bytes) and the signer sends only the delta — an average of one hash (16 bytes) per signature.
 
 ## Files
 
@@ -35,7 +35,7 @@ Default (NIST Level I equivalent): n=16, w=16, H=20
 
 - Quantum security: ~2^54.9
 - Avg signature: ~580 bytes
-- On-chain state: 328 bytes/account
+- On-chain state: 324 bytes/account
 - Max signatures/key: ~1M (2^20)
 
 For stronger security: n=20 gives ~2^70.9 quantum security at ~724 bytes avg.
